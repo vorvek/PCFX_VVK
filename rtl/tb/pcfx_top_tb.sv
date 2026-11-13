@@ -13,6 +13,18 @@
 `define VERIFY_SRAM_LOAD 1
 `define SAVE_FRAMES 1
 
+// Boot mode. Default: cold boot from the BIOS with the CD inserted.
+// TB_RTZ: Return to Zork debug session. Loads the RAM snapshot
+// sdram_cd.hex and starts the CPU at 0x8000.
+//`define TB_RTZ 1
+//
+// Run-time options for the default mode (plusargs):
+//   +run_ms=N      Simulated time to run after reset, in ms (default 3000)
+//   +trace_ms=N    Start the FST trace at N ms (default: no trace)
+//   +dump_sdram    Write sdram.hex at the end of the run
+//   +press_run_ms=N  Press JP1 RUN at N ms, for 20 ms
+//   +press_b1_ms=N   Press JP1 button I at N ms, for 20 ms
+
 `ifdef PCFX_TOP_TB_CD
 import "DPI-C" function bit pcfx_mount_cd();
 import "DPI-C" task pcfx_read_cd(bit [7:0] buffer [], input int lba,
@@ -604,6 +616,7 @@ initial #0 begin
     reset = 0;
     $display("Reset released.");
 
+`ifdef TB_RTZ
     // Skip loading CD, resume at entry point
     $readmemh("sdram_cd.hex", sdrb.u1a.mem);
     force pcfx_top.mach.cpu.inex.ha = 32'h00008000;
@@ -625,6 +638,7 @@ initial #0 begin
     sdram_write(pcfx_top.memif_sdram.RAM_BASE_A + 27'h000142b4, 'hABFF);
     sdram_write(pcfx_top.memif_sdram.RAM_BASE_A + 27'h000142b6, 'hFF46);
  -----/\----- EXCLUDED -----/\----- */
+`endif
 
 `ifdef LOAD_SRAMS
     mount_sram();
@@ -638,9 +652,10 @@ initial #0 begin
     -> running;
 end
 
+`ifdef TB_RTZ
 initial begin
     @(running) ;
-    
+
     //repeat (3) #(1000e3) ;
     //#(762e3) ;
     #(689e3) ;
@@ -683,6 +698,74 @@ initial if (1) begin
     #(20e3) hmi.jp1.b[1] = '0;
     #(20e3);
 end
+
+`else // !TB_RTZ
+
+int run_ms = 3000;
+int trace_ms = -1;
+
+initial begin
+    void'($value$plusargs("run_ms=%d", run_ms));
+    void'($value$plusargs("trace_ms=%d", trace_ms));
+`ifdef SAVE_FRAMES
+`ifdef VERILATOR
+    void'($system("mkdir -p frames"));
+`endif
+`endif
+end
+
+initial begin
+    @(running) ;
+    $display("Booting from BIOS: run %0d ms", run_ms);
+
+    if (trace_ms >= 0 && trace_ms < run_ms) begin
+        #(trace_ms * 1e3) ;
+        $display("Trace started.");
+        $dumpvars();
+        #((run_ms - trace_ms) * 1e3) ;
+    end
+    else
+        #(run_ms * 1e3) ;
+
+`ifdef SAVE_SRAMS
+    if (bk_ena) begin
+        save_bk();
+        $display("RAMs saved.");
+    end
+`endif
+
+    if ($test$plusargs("dump_sdram"))
+        $writememh("sdram.hex", sdrb.u1a.mem);
+    $writememh("vce_cp.hex", pcfx_top.mach.vce.cpram.mem);
+    pcfx_top.mach.vce.dump_regs();
+    pcfx_top.mach.mmc.dump_regs();
+
+    $finish;
+end
+
+initial begin
+int press_ms;
+    if ($value$plusargs("press_run_ms=%d", press_ms)) begin
+        @(running) ;
+        #(press_ms * 1e3) ;
+        $display("Pressing JP1.RUN....");
+        hmi.jp1.run = '1;
+        #(20e3) hmi.jp1.run = '0;
+    end
+end
+
+initial begin
+int press_ms;
+    if ($value$plusargs("press_b1_ms=%d", press_ms)) begin
+        @(running) ;
+        #(press_ms * 1e3) ;
+        $display("Pressing JP1.B1....");
+        hmi.jp1.b[1] = '1;
+        #(20e3) hmi.jp1.b[1] = '0;
+    end
+end
+
+`endif // TB_RTZ
 
 endmodule
 
