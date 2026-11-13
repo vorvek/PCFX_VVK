@@ -273,6 +273,8 @@ mach mach
    .KRAMB_ACK(kramb_ack),
 
    .CD_EN(cd_mounted),
+   .CD_MOUNT(img_mounted[2]),
+   .CD_IMG_SIZE(img_size[31:0]),
    .CD_SD_LBA(sd_lba_cd),
    .CD_SD_RD(sd_rd_cd),
    .CD_SD_ACK(sd_ack_cd),

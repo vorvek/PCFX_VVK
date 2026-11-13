@@ -53,6 +53,11 @@ svBit pcfx_mount_cd()
     return (pcfx_get_img_size() == 0) ? sv_0 : sv_1;
 }
 
+int pcfx_cd_img_size()
+{
+    return pcfx_get_img_size();
+}
+
 int pcfx_read_cd(const svOpenArrayHandle buffer, int lba, int cnt)
 {
     VL_PRINTF("pcfx_read_cd(lba=%d, cnt=%d)\n", lba, cnt);

@@ -27,6 +27,7 @@
 
 `ifdef PCFX_TOP_TB_CD
 import "DPI-C" function bit pcfx_mount_cd();
+import "DPI-C" function int pcfx_cd_img_size();
 import "DPI-C" task pcfx_read_cd(bit [7:0] buffer [], input int lba,
                                  input int cnt);
 `endif
@@ -321,7 +322,7 @@ bit mounted;
 endtask
 
 always @mount_cd begin
-    img_size <= 64'd407024064;
+    img_size <= 64'(pcfx_cd_img_size());   // lead-out LBA * 2352
     @(posedge clk_sys) ;
     img_mounted[2] <= '1;
     @(posedge clk_sys) ;

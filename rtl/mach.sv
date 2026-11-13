@@ -65,6 +65,8 @@ module mach
 
    // CD-ROM block transfer interface
    input         CD_EN,
+   input         CD_MOUNT,       // pulse: image (un)mounted
+   input [31:0]  CD_IMG_SIZE,    // valid with CD_MOUNT
    output [31:0] CD_SD_LBA,
    output        CD_SD_RD,
    input         CD_SD_ACK,
@@ -85,8 +87,8 @@ module mach
    output        VID_VBL,
    output        VID_HBL,
 
-   output [15:0] AUD_SLOUT,
-   output [15:0] AUD_SROUT
+   output signed [15:0] AUD_SLOUT,
+   output signed [15:0] AUD_SROUT
    );
 
 wire [31:0]     cpu_a;
@@ -163,7 +165,8 @@ logic           hs_posedge, hs_negedge;
 logic           vs_posedge, vs_negedge;
 
 wire            apu_csn;
-wire [15:0]     apu_slout, apu_srout;
+wire signed [15:0] apu_slout, apu_srout;
+wire signed [15:0] cdda_l, cdda_r;
 
 wire [15:0]     vpu_do;
 wire            vpu_csn;
@@ -599,6 +602,9 @@ huc6230 apu
     .DCK(dckkr),
     .HSYNC_NEGEDGE(hs_negedge),
 
+    .LINE_L(cdda_l),
+    .LINE_R(cdda_r),
+
     .SLOUT(apu_slout),
     .SROUT(apu_srout)
     );
@@ -717,6 +723,20 @@ assign MCP_WRn = mcp_csn | cpu_rw;
 
 assign scsi_data = mmc_scsi_doe ? mmc_scsi_do : scsi_cd_do;
 
+// fake_cd <-> cdda
+wire [31:0]     fcd_sd_lba;
+wire            fcd_sd_rd, fcd_sd_ack, fcd_busy;
+wire [12:0]     fcd_sdbuf_addr;
+wire            au_play, au_play_pause, au_play_repeat, au_play_mute;
+wire [18:0]     au_play_start, au_play_end;
+wire            au_pause, au_resume, au_stop;
+wire [1:0]      au_pause_status, au_status;
+wire [18:0]     au_pos, au_start;
+wire            toc_valid;
+wire [6:0]      first_track, last_track, tt_track, q_track;
+wire [18:0]     leadout, tt_start, q_track_start;
+wire [3:0]      tt_control, q_control;
+
 fake_cd fake_cd
     (
      .CLK(CLK),
@@ -738,11 +758,87 @@ fake_cd fake_cd
      .MSGOUT_SEND(scsi_cd_msgout_send),
 
      .MEDIUM_EMPTY(~CD_EN),
+     .SD_LBA(fcd_sd_lba),
+     .SD_RD(fcd_sd_rd),
+     .SD_ACK(fcd_sd_ack),
+     .SDBUF_ADDR(fcd_sdbuf_addr),
+     .SDBUF_DOUT(CD_SDBUF_DOUT),
+     .BUSY(fcd_busy),
+
+     .AU_PLAY(au_play),
+     .AU_PLAY_PAUSE(au_play_pause),
+     .AU_PLAY_START(au_play_start),
+     .AU_PLAY_END(au_play_end),
+     .AU_PLAY_REPEAT(au_play_repeat),
+     .AU_PLAY_MUTE(au_play_mute),
+     .AU_PAUSE(au_pause),
+     .AU_PAUSE_STATUS(au_pause_status),
+     .AU_RESUME(au_resume),
+     .AU_STOP(au_stop),
+     .AU_STATUS(au_status),
+     .AU_POS(au_pos),
+     .AU_START(au_start),
+     .TOC_VALID(toc_valid),
+     .FIRST_TRACK(first_track),
+     .LAST_TRACK(last_track),
+     .LEADOUT(leadout),
+     .TT_TRACK(tt_track),
+     .TT_START(tt_start),
+     .TT_CONTROL(tt_control),
+     .Q_TRACK(q_track),
+     .Q_TRACK_START(q_track_start),
+     .Q_CONTROL(q_control)
+     );
+
+cdda cdda
+    (
+     .CLK(CLK),
+     .RESn(RESn),
+
+     .CD_EN(CD_EN),
+     .MOUNT(CD_MOUNT),
+     .IMG_SIZE(CD_IMG_SIZE),
+
+     .PLAY(au_play),
+     .PLAY_PAUSE(au_play_pause),
+     .PLAY_START(au_play_start),
+     .PLAY_END(au_play_end),
+     .PLAY_REPEAT(au_play_repeat),
+     .PLAY_MUTE(au_play_mute),
+     .PAUSE(au_pause),
+     .PAUSE_STATUS(au_pause_status),
+     .RESUME(au_resume),
+     .STOP(au_stop),
+
+     .STATUS(au_status),
+     .POS_LBA(au_pos),
+     .START_LBA(au_start),
+
+     .TOC_VALID(toc_valid),
+     .FIRST_TRACK(first_track),
+     .LAST_TRACK(last_track),
+     .LEADOUT(leadout),
+     .TT_TRACK(tt_track),
+     .TT_START(tt_start),
+     .TT_CONTROL(tt_control),
+     .Q_TRACK(q_track),
+     .Q_TRACK_START(q_track_start),
+     .Q_CONTROL(q_control),
+
+     .A_SD_LBA(fcd_sd_lba),
+     .A_SD_RD(fcd_sd_rd),
+     .A_SD_ACK(fcd_sd_ack),
+     .A_SDBUF_ADDR(fcd_sdbuf_addr),
+     .A_BUSY(fcd_busy),
+
      .SD_LBA(CD_SD_LBA),
      .SD_RD(CD_SD_RD),
      .SD_ACK(CD_SD_ACK),
      .SDBUF_ADDR(CD_SDBUF_ADDR),
-     .SDBUF_DOUT(CD_SDBUF_DOUT)
+     .SDBUF_DOUT(CD_SDBUF_DOUT),
+
+     .OUT_L(cdda_l),
+     .OUT_R(cdda_r)
      );
 
 //////////////////////////////////////////////////////////////////////

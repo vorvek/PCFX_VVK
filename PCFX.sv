@@ -191,7 +191,7 @@ assign HDMI_FREEZE = 0;
 assign HDMI_BLACKOUT = 0;
 assign HDMI_BOB_DEINT = 0;
 
-assign AUDIO_S = '0;
+assign AUDIO_S = '1;  // HuC6230 mixer output is signed
 assign AUDIO_MIX = 0;
 
 assign LED_DISK = 0;
