@@ -122,6 +122,16 @@ logic           mem_start_req;
 logic           mem_pend_req = '0;
 logic           mem_req;
 logic           mem_act = '0;
+logic           mem_act_ram = '0;   // the active access is a RAM cache op
+logic           ram_sel;            // SDRAM ch1 address mux selects RAM op
+logic           ram_ackn = '1;      // RAM cache saw its op done (handshake)
+logic           ram_op_start = '0;  // RAM cache SDRAM op requested / in flight
+logic           ram_op_rd;          // op is a read (CPU waits, unless discard)
+logic           ram_op_disc;        // read op of a cache hit: drop the data
+logic           ram_spec;           // RAM read in T1, start SDRAM at once
+logic [20:0]    ram_op_a;
+logic [31:0]    ram_op_d;
+logic [3:0]     ram_op_be;
 logic           mem_we;
 logic           mem_rdy;
 logic           mem_readyn;
@@ -147,21 +157,27 @@ assign ls_act_dwell = ls_act | |ls_dwell;
 assign LS_RD_ACK = ls_rd_ack_d ^ ((LS_RD_REQ ^ ls_rd_ack_d) & ls_done);
 assign LS_WE_ACK = ls_we_ack_d ^ ((LS_WE_REQ ^ ls_we_ack_d) & ls_done);
 
+// RAM accesses go through the RAM cache (below), which starts SDRAM
+// operations with ram_op_start (a level, held until the op is done). A
+// RAM read starts in T1 (ram_spec) when no RAM op is in flight, before
+// the cache tag check; the cache then takes the op over at the end of T1.
 assign rom_start_req = ~CPU_BCYSTn & ~ROM_CEn;
-assign ram_start_req = ~CPU_BCYSTn & ~RAM_CEn;
+assign ram_spec = ~CPU_BCYSTn & ~RAM_CEn & RAM_WEn & ~ram_op_start;
+assign ram_start_req = ram_op_start | ram_spec;
 assign sram_start_req = ~CPU_BCYSTn & ~SRAM_CEn;
 assign bmp_start_req = ~CPU_BCYSTn & ~BMP_CEn;
-assign mem_start_req = rom_start_req | ram_start_req | sram_start_req | bmp_start_req;
+assign mem_start_req = rom_start_req | sram_start_req | bmp_start_req;
 
-assign mem_req = ~ls_act_dwell & ~mem_act & (mem_start_req | mem_pend_req) & mem_readyn;
-assign mem_readyn = rom_readyn & ram_readyn & sram_readyn & bmp_readyn;
+assign mem_req = ~ls_act_dwell & ~mem_act & (mem_start_req | mem_pend_req | ram_start_req) & mem_readyn;
+assign mem_readyn = rom_readyn & ram_ackn & sram_readyn & bmp_readyn;
+assign ram_sel = mem_act ? mem_act_ram : ram_start_req;
 
 assign ch1_req = mem_req | ls_req;
 assign ch1_act = mem_act | ls_act;
 assign ch1_ready = (ch1_ready_d & ~(~ch1_act & ch1_req)) | SDRAM_CH1_READY;
 
 always @(posedge SDRAM_CLK) begin
-    mem_pend_req <= (mem_pend_req | mem_start_req) & ~(~CPU_RESn | mem_act);
+    mem_pend_req <= (mem_pend_req | mem_start_req) & ~(~CPU_RESn | (mem_act & ~mem_act_ram));
     ch1_ready_d <= ch1_ready;
 
     if (ls_done) begin
@@ -174,8 +190,10 @@ always @(posedge SDRAM_CLK) begin
     if (~ch1_act & SDRAM_CH1_REQ) begin
         if (ls_req)
             ls_act <= '1;
-        else if (mem_req)
+        else if (mem_req) begin
             mem_act <= '1;
+            mem_act_ram <= ram_start_req;
+        end
     end
 
     if (mem_act & (~CPU_RESn | (ch1_ready & ~mem_readyn)))
@@ -192,10 +210,189 @@ end
 assign mem_rdy = mem_act & ch1_ready;
 
 always @(posedge CPU_CLK) if (CPU_CE) begin
-    rom_readyn <= ROM_CEn | ~mem_rdy;
-    ram_readyn <= RAM_CEn | ~mem_rdy;
-    sram_readyn <= SRAM_CEn | ~mem_rdy;
-    bmp_readyn <= BMP_CEn | ~mem_rdy;
+    rom_readyn <= ROM_CEn | ~(mem_rdy & ~mem_act_ram);
+    sram_readyn <= SRAM_CEn | ~(mem_rdy & ~mem_act_ram);
+    bmp_readyn <= BMP_CEn | ~(mem_rdy & ~mem_act_ram);
+end
+
+//////////////////////////////////////////////////////////////////////
+// RAM cache
+//
+// Direct-mapped, 16K x 32-bit words (64 KB), write-through. SDRAM reads
+// take about 4 CPU cycles per bus cycle, but the real RAM (and Mednafen)
+// has no wait states inside a DRAM page. Raster interrupt handlers that
+// set the next line's RCR (Lip) missed the compare by a few cycles.
+//
+// - Read hit: READYn in the first T2 cycle (no wait state).
+// - Read miss: SDRAM read, then the word is filled into the cache. The
+//   read starts in T1 (ram_spec), so a miss is not slower than without
+//   the cache; on a hit, the data of that read is dropped.
+// - Write: posted. READYn at once if no SDRAM op is in flight; the SDRAM
+//   write runs in the background. A hit updates the cached bytes; a
+//   full-word miss allocates the word.
+// The tag RAM is cleared on CPU reset. Only the CPU writes this RAM.
+
+localparam RC_IDXW = 14;
+localparam RC_TAGW = 19 - RC_IDXW;
+
+logic [RC_IDXW-1:0] rc_idx, rc_widx, rc_clr_idx;
+logic [RC_TAGW-1:0] rc_tag;
+logic [RC_TAGW:0]   rc_tag_q, rc_tag_wd;   // {valid, tag}
+logic [31:0]        rc_q, rc_wd;
+logic [3:0]         rc_wbe;
+logic               rc_twe;
+logic               rc_clr_act = '1;
+logic               rc_hit, rc_t1;
+logic               rc_dsel = '0;       // RAM_DO from the cache
+logic               acc_wait = '0;      // RAM access waits for a free op slot
+logic               ram_done, ram_free;
+logic               cur_v, cur_we;
+logic               rc_spec;
+
+assign rc_idx = RAM_A[RC_IDXW+1:2];
+assign rc_tag = RAM_A[20:RC_IDXW+2];
+assign rc_t1 = ~CPU_BCYSTn & ~RAM_CEn;
+assign rc_hit = ~rc_clr_act & rc_tag_q[RC_TAGW] & (rc_tag_q[RC_TAGW-1:0] == rc_tag);
+
+// SDRAM op done (sampled at CE, as the other readyn signals)
+assign ram_done = ram_op_start & mem_rdy & mem_act_ram;
+assign ram_free = ~ram_op_start | ram_done;
+
+// Access to start now: a waiting one, or a new one that is not a read hit
+assign cur_v = acc_wait | (rc_t1 & ~(RAM_WEn & rc_hit));
+assign cur_we = ~RAM_WEn;
+
+// Read in T1 with no op in flight: its SDRAM read already started
+assign rc_spec = rc_t1 & RAM_WEn & ~ram_op_start;
+
+dpram #(.addr_width(RC_IDXW), .data_width(RC_TAGW + 1)) rc_tagram
+   (
+    .clock(CPU_CLK),
+    .address_a(rc_idx),
+    .data_a('0),
+    .enable_a(1'b1),
+    .wren_a(1'b0),
+    .q_a(rc_tag_q),
+    .cs_a(1'b1),
+
+    .address_b(rc_clr_act ? rc_clr_idx : rc_widx),
+    .data_b(rc_clr_act ? '0 : rc_tag_wd),
+    .enable_b(1'b1),
+    .wren_b(rc_clr_act | (CPU_CE & rc_twe)),
+    .q_b(),
+    .cs_b(1'b1)
+    );
+
+genvar rc_i;
+generate
+    for (rc_i = 0; rc_i < 4; rc_i++) begin :rc_lane
+        dpram #(.addr_width(RC_IDXW), .data_width(8)) rc_dataram
+           (
+            .clock(CPU_CLK),
+            .address_a(rc_idx),
+            .data_a('0),
+            .enable_a(1'b1),
+            .wren_a(1'b0),
+            .q_a(rc_q[rc_i*8+:8]),
+            .cs_a(1'b1),
+
+            .address_b(rc_widx),
+            .data_b(rc_wd[rc_i*8+:8]),
+            .enable_b(1'b1),
+            .wren_b(~rc_clr_act & CPU_CE & rc_wbe[rc_i]),
+            .q_b(),
+            .cs_b(1'b1)
+            );
+    end
+endgenerate
+
+// Tag clear on CPU reset (every CPU_CLK)
+always @(posedge CPU_CLK) begin
+    if (~CPU_RESn) begin
+        rc_clr_act <= '1;
+        rc_clr_idx <= '0;
+    end
+    else if (rc_clr_act) begin
+        rc_clr_idx <= rc_clr_idx + 1'd1;
+        if (&rc_clr_idx)
+            rc_clr_act <= '0;
+    end
+end
+
+// Cache write port (data and tag), used at the next CE edge
+always @* begin
+    rc_widx = ram_op_a[RC_IDXW+1:2];
+    rc_wd = SDRAM_CH1_DOUT;
+    rc_wbe = '0;
+    rc_twe = '0;
+    rc_tag_wd = {1'b1, ram_op_a[20:RC_IDXW+2]};
+
+    if (ram_done & ram_op_rd & ~ram_op_disc) begin
+        // Fill after a read miss
+        rc_wbe = '1;
+        rc_twe = '1;
+    end
+    else if (cur_v & cur_we & ram_free & CPU_RESn) begin
+        // Posted write (CPU holds A, D, BEn): update or allocate
+        rc_widx = rc_idx;
+        rc_wd = RAM_DI;
+        rc_tag_wd = {1'b1, rc_tag};
+        if (rc_hit)
+            rc_wbe = ~RAM_BEn;
+        else if (RAM_BEn == 4'b0000) begin
+            rc_wbe = '1;
+            rc_twe = '1;
+        end
+    end
+end
+
+always @(posedge CPU_CLK) if (CPU_CE) begin
+    ram_readyn <= '1;
+    ram_ackn <= '1;
+
+    if (~CPU_RESn) begin
+        ram_op_start <= '0;
+        acc_wait <= '0;
+        rc_dsel <= '0;
+    end
+    else begin
+        if (ram_done) begin
+            ram_op_start <= '0;
+            ram_ackn <= '0;
+            if (ram_op_rd & ~ram_op_disc) begin
+                ram_readyn <= '0;
+                rc_dsel <= '0;
+            end
+        end
+
+        if (rc_t1 & RAM_WEn & rc_hit) begin
+            ram_readyn <= '0;
+            rc_dsel <= '1;
+        end
+
+        if (rc_spec) begin
+            // Take over the read that started in T1 (no op was in flight)
+            ram_op_start <= '1;
+            ram_op_rd <= '1;
+            ram_op_disc <= rc_hit;
+            ram_op_a <= RAM_A;
+            acc_wait <= '0;
+        end
+        else if (cur_v & ram_free) begin
+            // Start the SDRAM op. The CPU holds A, D and BEn until READYn.
+            ram_op_start <= '1;
+            ram_op_rd <= ~cur_we;
+            ram_op_disc <= '0;
+            ram_op_a <= RAM_A;
+            ram_op_d <= RAM_DI;
+            ram_op_be <= ~RAM_BEn;
+            acc_wait <= '0;
+            if (cur_we)
+                ram_readyn <= '0;   // posted write
+        end
+        else if (rc_t1 & ~(RAM_WEn & rc_hit))
+            acc_wait <= '1;
+    end
 end
 
 // SDRAM_CH1_DOUT is in the SDRAM_CLK domain. Latching into the CPU_CLK
@@ -212,7 +409,7 @@ assign LS_DOUT = SDRAM_CH1_DOUT;
 assign ROM_DO = rom_do;
 assign ROM_READYn = rom_readyn;
 
-assign RAM_DO = ram_do;
+assign RAM_DO = rc_dsel ? rc_q : ram_do;
 assign RAM_READYn = ram_readyn;
 
 assign SRAM_DO = sram_do;
@@ -232,15 +429,16 @@ always @* begin
         sdram_ch1_be = '1;
         sdram_ch1_addr = LS_ADDR;
     end
+    else if (ram_sel) begin
+        // Before the end of T1, a started read uses the CPU address.
+        mem_we = ram_op_start & ~ram_op_rd;
+        sdram_ch1_din = ram_op_d;
+        sdram_ch1_be = mem_we ? ram_op_be : 4'b1111;
+        sdram_ch1_addr = RAM_BASE_A + 27'(ram_op_start ? ram_op_a : RAM_A);
+    end
     else if (~ROM_CEn) begin
         sdram_ch1_addr = ROM_BASE_A + 27'(ROM_A);
         sdram_ch1_be = '1;
-    end
-    else if (~RAM_CEn) begin
-        mem_we = ~RAM_WEn;
-        sdram_ch1_din = RAM_DI;
-        sdram_ch1_be = ~RAM_BEn;
-        sdram_ch1_addr = RAM_BASE_A + 27'(RAM_A);
     end
     else if (~SRAM_CEn) begin
         mem_we = ~SRAM_WEn;
