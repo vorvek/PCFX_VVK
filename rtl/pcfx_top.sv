@@ -49,6 +49,7 @@ module pcfx_top
     input             bmp_eject_rom,
 
     input             hmi_t HMI,
+    input             HCROP,     // hide the horizontal border
 
 	output            SDRAM_CKE,
 	output [12:0]     SDRAM_A,
@@ -62,6 +63,8 @@ module pcfx_top
 	output            SDRAM_nWE,
 
     output            ERROR,
+    output            DBG_TXD,
+    input             DBG_RXD,
 
     output            ce_pix,
 
@@ -204,7 +207,13 @@ wire        ls_we_req, ls_we_ack;
 wire        ls_rd_req, ls_rd_ack;
 
 wire clk_cpu = clk_sys;
-wire reset_int = reset | ioctl_download;
+wire kram_clr_busy;
+logic [1:0] kram_clr_busy_s = '1;   // to clk_cpu
+
+always @(posedge clk_cpu)
+  kram_clr_busy_s <= {kram_clr_busy_s[0], kram_clr_busy};
+
+wire reset_int = reset | ioctl_download | kram_clr_busy_s[1];
 
 initial cpu_ce = 0;
 initial reset_cpu = 1;
@@ -282,9 +291,12 @@ mach mach
    .CD_SDBUF_DOUT(cd_sdbuf_dout),
 
    .HMI(HMI),
+   .HCROP(HCROP),
 
    .A(a),
    .ERROR(ERROR),
+   .DBG_TXD(DBG_TXD),
+   .DBG_RXD(DBG_RXD),
 
    .VID_PCE(vid_pce),
    .VID_Y(vid_y),
@@ -358,6 +370,9 @@ memif_sdram memif_sdram
    .LS_RD_ACK(ls_rd_ack),
 
    .SDRAM_CLK(clk_ram),
+   .SDRAM_INIT(~pll_locked),
+   .KRAM_CLR_REQ(reset),
+   .KRAM_CLR_BUSY(kram_clr_busy),
    .SDRAM_CH1_ADDR(sdram_ch1_addr),
    .SDRAM_CH1_DOUT(sdram_ch1_dout),
    .SDRAM_CH1_DIN(sdram_ch1_din),

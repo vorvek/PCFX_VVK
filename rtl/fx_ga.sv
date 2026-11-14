@@ -176,6 +176,10 @@ logic [15:0]    dout;
 logic [15:0]    kpc0_do, kpc1_do;
 logic           kpc0_csn, kpc1_csn;
 
+logic [2:0]     tm_ctrl;
+logic [15:0]    tm_period;
+logic [16:0]    tm_cnt;
+
 always @(posedge CLK) if (CE) begin
     if (~RESn) begin
         imr <= '1;
@@ -212,6 +216,12 @@ always @* begin
                 8'hE4: dout[6:0] = imr;
                 8'hE8: dout[11:0] = {ilr[3], ilr[2], ilr[1], ilr[0]};
                 8'hEC: dout[8:0] = {ilr[6], ilr[5], ilr[4]};
+                8'hF0, 8'hF1, 8'hF2, 8'hF3:
+                    dout[2:0] = tm_ctrl;
+                8'hF8, 8'hF9, 8'hFA, 8'hFB:
+                    dout = tm_period;
+                8'hFC, 8'hFD, 8'hFE, 8'hFF:
+                    dout = tm_cnt[15:0];
                 default: ;
             endcase
     end
@@ -239,7 +249,53 @@ end
 
 //////////////////////////////////////////////////////////////////////
 // TMC: Timer Control Unit
-// (TODO)
+//
+// As Mednafen (timer.cpp): F00h control (bit 0 interrupt enable, bit 1
+// run, bit 2 interrupt status), F80h period (0 = 10000h), FC0h count.
+// The count decrements once every 15 CPU clocks; at zero it reloads with
+// the period and, if enabled, raises the interrupt (INTTM).
+
+logic [3:0]     tm_pre;
+wire [16:0]     tm_eff_period = (tm_period == 16'd0) ? 17'h10000 : {1'b0, tm_period};
+wire            tm_csn = ~(~FX_GA_CSn & (A[11:8] == 4'hF));
+
+always @(posedge CLK) if (CE) begin
+    if (~RESn) begin
+        tm_ctrl <= '0;
+        tm_period <= '0;
+        tm_cnt <= 17'h10000;
+        tm_pre <= '0;
+    end
+    else begin
+        if (tm_ctrl[1]) begin
+            tm_pre <= tm_pre + 1'd1;
+            if (tm_pre == 4'd14) begin
+                tm_pre <= '0;
+                tm_cnt <= tm_cnt - 1'd1;
+                if (tm_cnt == 17'd1) begin
+                    tm_cnt <= tm_eff_period;
+                    if (tm_ctrl[0])
+                        tm_ctrl[2] <= '1;
+                end
+            end
+        end
+
+        if (~tm_csn & ~WRn) begin
+            case (A[7:6])
+                2'b00: begin
+                    if (~tm_ctrl[1] & DI[1]) begin
+                        tm_cnt <= tm_eff_period;
+                        tm_pre <= '0;
+                    end
+                    tm_ctrl <= DI[2:0];
+                end
+                2'b10:
+                    tm_period <= DI;
+                default: ;
+            endcase
+        end
+    end
+end
 
 //////////////////////////////////////////////////////////////////////
 // KPC: K-Port (Keypad) Control Unit
@@ -307,7 +363,8 @@ assign kpc_int = kpc0_int | kpc1_int;
 logic [6:0]     eisr;           // un-masked (enabled) ISR
 logic [2:0]     hail;           // highest active interrupt level
 
-assign isr[6:5] = '0;
+assign isr[6] = tm_ctrl[2];
+assign isr[5] = '0;
 assign isr[4] = kpc_int;
 assign isr[3:0] = DINT[3:0];
 

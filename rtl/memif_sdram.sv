@@ -66,6 +66,9 @@ module memif_sdram
 	output        LS_RD_ACK,
 
     input         SDRAM_CLK,
+    input         SDRAM_INIT,       // SDRAM controller init (PLL not locked)
+    input         KRAM_CLR_REQ,     // rising edge: clear KRAM (core reset)
+    output        KRAM_CLR_BUSY,    // KRAM clear in progress
     output [26:0] SDRAM_CH1_ADDR,
     input [31:0]  SDRAM_CH1_DOUT,
     output [31:0] SDRAM_CH1_DIN,
@@ -260,6 +263,65 @@ assign SDRAM_CH1_RNW = ~mem_we;
 assign SDRAM_CH1_REQ = ch1_ready_d & ch1_req;
 
 //////////////////////////////////////////////////////////////////////
+// KRAM clear after core load and on each reset
+//
+// The SDRAM keeps its contents when the core is loaded again or reset,
+// so KRAM would still hold the data of the last session (for example a
+// RAINBOW movie frame, which then shows at the next game start). After
+// the FPGA is configured, and on each rising edge of KRAM_CLR_REQ (the
+// core reset), write zeros to all of KRAM A and B. The core is held in
+// reset until the clear is done. (Real hardware keeps DRAM contents on
+// a reset; a clean start is preferred here.)
+
+logic           kclr_act = '1;      // set by FPGA configuration and reset
+logic [2:0]     kclr_req_s = '0;    // KRAM_CLR_REQ to SDRAM_CLK, and edge
+logic           kclr_busy = '0;     // a write is in flight
+logic           kclr_issue = '0;    // request pulse
+logic [1:0]     kclr_pend = '0;     // bank A/B write not yet ready
+logic [17:0]    kclr_a = '0;        // word address
+logic [7:0]     kclr_start = '0;    // delay after SDRAM init
+
+always @(posedge SDRAM_CLK) begin
+    logic [1:0] pend;
+
+    kclr_issue <= '0;
+    pend = kclr_pend & ~{SDRAM_CH3_READY, SDRAM_CH2_READY};
+    kclr_req_s <= {kclr_req_s[1:0], KRAM_CLR_REQ};
+
+    if (SDRAM_INIT | (kclr_req_s[1] & ~kclr_req_s[2])) begin
+        // Start over. (init also clears pending requests in the
+        // controller.) A KING write in flight finishes during the start
+        // delay; its READY is not counted, because kclr_pend is clear.
+        kclr_act <= '1;
+        kclr_start <= '0;
+        kclr_busy <= '0;
+        kclr_pend <= '0;
+        kclr_a <= '0;
+    end
+    else if (kclr_act) begin
+        if (~&kclr_start)
+            kclr_start <= kclr_start + 1'd1;
+        else if (~kclr_busy) begin
+            kclr_issue <= '1;
+            kclr_pend <= 2'b11;
+            kclr_busy <= '1;
+        end
+        else begin
+            kclr_pend <= pend;
+            if (pend == '0) begin
+                kclr_busy <= '0;
+                if (&kclr_a)
+                    kclr_act <= '0;
+                else
+                    kclr_a <= kclr_a + 1'd1;
+            end
+        end
+    end
+end
+
+assign KRAM_CLR_BUSY = kclr_act;
+
+//////////////////////////////////////////////////////////////////////
 
 logic           ch2_req;
 logic           krama_req_d;
@@ -274,12 +336,12 @@ always @(posedge SDRAM_CLK) begin
     krama_ack_d <= krama_ack;
 end
 
-assign SDRAM_CH2_ADDR = KRAMA_BASE_A + 27'({KRAMA_A, 1'b0});
-assign SDRAM_CH2_DIN = KRAMA_DO;
-assign SDRAM_CH2_REQ = ch2_req;
-assign SDRAM_CH2_RNW = ~KRAMA_WR;
+assign SDRAM_CH2_ADDR = KRAMA_BASE_A + 27'({kclr_act ? kclr_a : KRAMA_A, 1'b0});
+assign SDRAM_CH2_DIN = kclr_act ? '0 : KRAMA_DO;
+assign SDRAM_CH2_REQ = kclr_act ? kclr_issue : ch2_req;
+assign SDRAM_CH2_RNW = kclr_act ? 1'b0 : ~KRAMA_WR;
 assign KRAMA_DI = SDRAM_CH2_DOUT;
-assign KRAMA_ACK = krama_ack | krama_ack_d;  // double for CPU_CLK
+assign KRAMA_ACK = (krama_ack | krama_ack_d) & ~kclr_act;  // double for CPU_CLK
 
 //////////////////////////////////////////////////////////////////////
 
@@ -296,11 +358,11 @@ always @(posedge SDRAM_CLK) begin
     kramb_ack_d <= kramb_ack;
 end
 
-assign SDRAM_CH3_ADDR = KRAMB_BASE_A + 27'({KRAMB_A, 1'b0});
-assign SDRAM_CH3_DIN = KRAMB_DO;
-assign SDRAM_CH3_REQ = ch3_req;
-assign SDRAM_CH3_RNW = ~KRAMB_WR;
+assign SDRAM_CH3_ADDR = KRAMB_BASE_A + 27'({kclr_act ? kclr_a : KRAMB_A, 1'b0});
+assign SDRAM_CH3_DIN = kclr_act ? '0 : KRAMB_DO;
+assign SDRAM_CH3_REQ = kclr_act ? kclr_issue : ch3_req;
+assign SDRAM_CH3_RNW = kclr_act ? 1'b0 : ~KRAMB_WR;
 assign KRAMB_DI = SDRAM_CH3_DOUT;
-assign KRAMB_ACK = kramb_ack | kramb_ack_d;  // double for CPU_CLK
+assign KRAMB_ACK = (kramb_ack | kramb_ack_d) & ~kclr_act;  // double for CPU_CLK
 
 endmodule

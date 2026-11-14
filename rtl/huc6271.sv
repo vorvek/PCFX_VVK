@@ -11,6 +11,10 @@
 
 // TODO: Rewrite to optimize for synthesis (e.g., use RAMs)
 
+// RAINBOW_DEBUG: show a strip that timed out (decode started but did not
+// reach the end of the strip data within 16 lines) as a solid band.
+//`define RAINBOW_DEBUG 1
+
 module huc6271
    (
     input             CLK,
@@ -18,7 +22,7 @@ module huc6271
     input             RESn,
 
     // CPU memory / I/O bus interface
-    input [3:1]       A,
+    input [4:1]       A,         // A[1]: high half of a 32-bit register
     input [15:0]      DI,
     output [15:0]     DO,
     input             CSn,
@@ -48,7 +52,11 @@ module huc6271
     input             DCK, // pixel clock enable
     input             HSYNC_NEGEDGE,
     output reg        VDMODE, // 0=palette, 1=YUV
-    output reg [23:0] VD // [7:0] = palette data / [23:0] = {Y,U,V}
+    output reg [23:0] VD, // [7:0] = palette data / [23:0] = {Y,U,V}
+
+    // Debug: {window count, decoded strip count, header count,
+    //         {SRT, DCT state, input state}}
+    output [31:0]     DBG
     );
 
 logic           si_hdr_det, si_block, si_end;
@@ -57,8 +65,57 @@ wor             si_dec_blk_done;
 
 //////////////////////////////////////////////////////////////////////
 // CPU memory / I/O bus interface
+//
+// 04h control: bit 0 SRT (0 = reset, 1 = run), taken at the next HSync.
+//     In reset, the decoder, the input FIFO and both strip buffers are
+//     cleared, nothing is displayed, and the null color registers are
+//     cleared and ignore writes (MAME huc6271.cpp).
+// 08h Y, 0Ch U, 10h V: null macroblock color (signed; the decoder uses
+//     value + 80h).
+// TODO: 00h horizontal scroll, 04h bits 1-2 (endless scroll, block noise
+//     filter), 14h horizontal sync adjust
 
-// TODO
+logic [7:0]     back_y, back_u, back_v;
+logic [2:0]     ctrl_reg;
+logic           rb_run;
+
+wire dec_resn = RESn & rb_run;
+
+// The registers are 32 bits wide on a 16-bit bus. Only the low half
+// (A[1] = 0) holds bits; a write to the high half (for example the second
+// bus cycle of a 32-bit store) does not change them.
+wire [2:0] reg_a = A[4:2];
+wire reg_wr = ~CSn & ~WRn & ~A[1];
+
+always @(posedge CLK) if (CE) begin
+    if (~RESn)
+        ctrl_reg <= '0;
+    else if (reg_wr & (reg_a == 3'd1))
+        ctrl_reg <= DI[2:0];
+end
+
+always @(posedge CLK) begin
+    if (~RESn)
+        rb_run <= '0;
+    else if (HSYNC_NEGEDGE)
+        rb_run <= ctrl_reg[0];
+end
+
+always @(posedge CLK) if (CE) begin
+    if (~dec_resn) begin
+        back_y <= 8'h80;
+        back_u <= 8'h80;
+        back_v <= 8'h80;
+    end
+    else if (reg_wr) begin
+        case (reg_a)
+            3'd2: back_y <= DI[7:0] + 8'h80;
+            3'd3: back_u <= DI[7:0] + 8'h80;
+            3'd4: back_v <= DI[7:0] + 8'h80;
+            default: ;
+        endcase
+    end
+end
 
 //////////////////////////////////////////////////////////////////////
 // Main FSM
@@ -70,9 +127,10 @@ logic           dec_act;
 logic [1:0]     dec_valid;
 logic [1:0]     dec_vdmode;
 logic           dec_vend;
+logic [1:0]     dbg_to;
 
 always @(posedge CLK) begin
-    if (~RESn) begin
+    if (~dec_resn) begin
         h_cnt <= '0;
         v_cnt <= '0;
         rbsel <= '0;
@@ -80,6 +138,7 @@ always @(posedge CLK) begin
         dec_vend <= '0;
         dec_valid <= '0;
         dec_vdmode <= '0;
+        dbg_to <= '0;
     end
     else begin
         if (CE)
@@ -90,6 +149,9 @@ always @(posedge CLK) begin
         end
         if (HSYNC_NEGEDGE) begin
             if (v_cnt == 4'd15) begin
+`ifdef RAINBOW_DEBUG
+                dbg_to[rbsel] <= dec_act & ~si_end;
+`endif
                 dec_valid[rbsel] <= (dec_act & si_end);
                 dec_vdmode[rbsel] <= si_hdr_dct;
                 dec_act <= '0;
@@ -137,7 +199,7 @@ wire si_len_end = si_len <= 16'd2; // include 2 length bytes
 wire si_len_end_tail = si_len == '0;
 
 always @(posedge CLK) if (CE) begin
-    if (~RESn) begin
+    if (~dec_resn) begin
         sist <= SIS_INIT;
         si_hdr <= '0;
         si_len <= '1;
@@ -151,14 +213,19 @@ always @(posedge CLK) if (CE) begin
         end
 
         case (sist)
+            // Block search as Mednafen (rainbow.cpp): FFh, then a valid
+            // block type (F0h-F3h RLE, F8h/FFh DCT). The byte before FFh
+            // does not matter; at the change from one stream to the next
+            // it is often not zero.
             SIS_INIT:
                 if (si_din) begin
-                    if (si_din_zeros & &KBUS_DI)
+                    if (&KBUS_DI)
                         sist <= SIS_HDR_TYPE;
                 end
             SIS_HDR_TYPE:
                 if (si_din) begin
-                    if (si_din_ones & &KBUS_DI[7:4]) begin
+                    if ((KBUS_DI[7:2] == 6'b111100) | (KBUS_DI == 8'hF8) |
+                        (KBUS_DI == 8'hFF)) begin
                         si_hdr <= KBUS_DI[3:0];
                         sist <= SIS_HDR_LEN1;
                     end
@@ -196,7 +263,7 @@ always @(posedge CLK) if (CE) begin
 end
 
 always @* begin
-    kbus_req = RESn;
+    kbus_req = dec_resn;
     si_ready = si_din;
     case (sist)
         SIS_BLOCK: begin
@@ -220,6 +287,17 @@ assign si_end = (sist == SIS_END);
 assign si_hdr_dct = si_hdr[3];
 
 //////////////////////////////////////////////////////////////////////
+// DCT decoder clock enable
+//
+// The DCT path (decoder, IDCT, R-RAM store) runs at the full CLK rate,
+// twice the chip's 21.48 MHz (CE). At CE rate it can miss the 16-line
+// deadline on detailed images; the real chip has a deeper pipeline. The
+// path meets timing at CLK, and the R-RAM writes on every CLK. The
+// K-BUS input, the RLE decoder and the video output stay at CE.
+
+wire            DCE = 1'b1;
+
+//////////////////////////////////////////////////////////////////////
 // Block data buffer
 //
 // This is a solution to a problem seen when KING video fetch is fully
@@ -237,14 +315,14 @@ logic [7:0]     sbuf_rdata, sbuf_dout;
 
 fifo1 #(.DSIZE(8), .ASIZE(7)) sbuf_fifo
    (
-    .WRST_N(RESn),
+    .WRST_N(dec_resn),
     .WCLK(CLK),
     .WDATA(KBUS_DI),
     .WINC(sbuf_din & CE),
     .WFULL(sbuf_full),
-    .RRST_N(RESn),
+    .RRST_N(dec_resn),
     .RCLK(CLK),
-    .RINC(sbuf_rinc & CE),
+    .RINC(sbuf_rinc & (si_hdr_dct ? DCE : CE)),
     .REMPTY(sbuf_empty),
     .RDATA(sbuf_rdata)
     );
@@ -353,7 +431,8 @@ typedef enum bit [3:0] {
     DCTS_V,
     DCTS_COL_DONE,
     DCTS_SYNC_STORE,
-    DCTS_BLK_DONE
+    DCTS_BLK_DONE,
+    DCTS_NULL       // fill a run of null macroblocks
 } dcts_t;
 
 // Plane (Ynn,U,V) decode state
@@ -418,8 +497,16 @@ logic               dct_sync_store;
 logic [12:0]        dct_raddr;
 logic [7:0]         dct_rdata;
 logic               dct_rwe;
+// Null macroblock run: DC code 0Fh, then an AC code whose zero run + 1
+// is the number of macroblocks to fill with the null color (back_*).
+logic               dct_null_code;  // DC code 0Fh read, run code follows
+logic [4:0]         dct_null_run;
+logic [2:0]         dct_null_plane;
+logic [1:0]         dct_null_ph;
+logic               dct_null_trig;
+logic               dct_store_null;
 
-always @(posedge CLK) if (CE) begin
+always @(posedge CLK) if (DCE) begin
     dct_ictbl_we <= '0;
     dct_ac_zero <= '0;
 
@@ -430,6 +517,11 @@ always @(posedge CLK) if (CE) begin
             dctds <= DCTDS_INIT;
             dcts_store <= DCTS_INIT;
             dct_store_col <= '0;
+            dct_null_code <= '0;
+            dct_null_ph <= '0;
+            dct_null_plane <= '0;
+            dct_null_trig <= '0;
+            dct_store_null <= '0;
             if (si_block & si_hdr_dct) begin
                 if (si_hdr[2]) begin
                     dcts <= DCTS_IQTBL;
@@ -471,8 +563,54 @@ always @(posedge CLK) if (CE) begin
                 dcts <= DCTS_BLK_DONE;
         DCTS_BLK_DONE:
             dctds <= DCTDS_INIT;
+        DCTS_NULL:
+            // Store each of the 6 blocks of the macroblock with the null
+            // color, through the IDCT output store path.
+            case (dct_null_ph)
+                2'd0:
+                    if (dct_sync_store) begin
+                        dcts_store <= dcts_t'(DCTS_Y00 + dct_null_plane);
+                        dct_store_col <= dct_col;
+                        dct_store_null <= '1;
+                        dct_null_trig <= '1;
+                        dct_null_ph <= 2'd1;
+                    end
+                2'd1: begin
+                    dct_null_trig <= '0;
+                    if (dct_store_act)
+                        dct_null_ph <= 2'd2;
+                end
+                default:
+                    if (~dct_store_act) begin
+                        dct_null_ph <= 2'd0;
+                        dct_null_plane <= dct_null_plane + 1'd1;
+                        if (dct_null_plane == 3'd5) begin
+                            dct_null_plane <= '0;
+                            dct_null_run <= dct_null_run - 1'd1;
+                            if (dct_col == 4'd15) begin
+                                dct_store_null <= '0;
+                                dcts <= DCTS_SYNC_STORE;
+                            end
+                            else begin
+                                dct_col <= dct_col + 1'd1;
+                                if (dct_null_run == 5'd1) begin
+                                    dct_store_null <= '0;
+                                    dctps <= DCTPS_INIT;
+                                    dcts <= DCTS_Y00;
+                                end
+                            end
+                        end
+                    end
+            endcase
         default: ;
     endcase
+
+    // Start each strip from a clean state. A strip that did not finish
+    // in its 16-line window has timed out; without this reset the FSM can
+    // stay stuck (for example waiting for bits after the block end) and
+    // every later strip times out too (black RAINBOW layer).
+    if (~dec_resn | ~dec_act)
+        dcts <= DCTS_INIT;
 
     // Plane FSM
     case (dctps)
@@ -509,8 +647,10 @@ always @(posedge CLK) if (CE) begin
             if (dct_bits_ready) begin
                 if (dct_bits_code < 8'h0f)
                     dctds <= DCTDS_DC_K;
-                else if (dct_bits_code == 8'h0f)
+                else if (dct_bits_code == 8'h0f) begin
+                    dct_null_code <= '1;
                     dctds <= DCTDS_AC_CODE;
+                end
                 else
                     dctds <= DCTDS_DC_CODE;
             end
@@ -525,9 +665,30 @@ always @(posedge CLK) if (CE) begin
                 dctds <= DCTDS_AC_K;
         DCTDS_AC_K:
             if (dct_bits_ready) begin
-                dctds <= DCTDS_AC_STORE;
-                if (dct_bits_pop_mse == '0 && dct_ac_zeros == '0)
-                    dctds <= DCTDS_AC_END;
+                if (dct_null_code) begin
+                    // The run code and its value bits are consumed.
+                    dct_null_code <= '0;
+                    if (dcts == DCTS_Y00) begin
+                        // First block of a macroblock: null run
+                        dct_null_run <= 5'(dct_bits_code_d[7:4]) + 1'd1;
+                        dct_null_plane <= '0;
+                        dct_null_ph <= '0;
+                        dctds <= DCTDS_DONE;
+                        dctps <= DCTPS_INIT;
+                        dcts <= DCTS_NULL;
+                    end
+                    else begin
+                        // Other blocks (as MAME): DC difference 0, then
+                        // the AC codes of the block
+                        dct_ictbl_we <= '1;
+                        dctds <= DCTDS_AC_CODE;
+                    end
+                end
+                else begin
+                    dctds <= DCTDS_AC_STORE;
+                    if (dct_bits_pop_mse == '0 && dct_ac_zeros == '0)
+                        dctds <= DCTDS_AC_END;
+                end
             end
         DCTDS_AC_STORE: begin
             dct_ictbl_we <= '1;
@@ -584,7 +745,7 @@ end
 //
 // The bitstream is apparently read starting at the most significant
 // bit, so it is shifted into the buffer from the right.
-always @(posedge CLK) if (CE) begin
+always @(posedge CLK) if (DCE) begin
     if (dctds == DCTDS_INIT) begin
         dct_bits_buf <= '0;
         dct_bits_cnt <= '0;
@@ -791,7 +952,7 @@ always @* begin
 end
 
 // Code -> coefficients
-always @(posedge CLK) if (CE) begin
+always @(posedge CLK) if (DCE) begin
     if (~RESn) begin
         dct_qc <= 4'd4;
     end
@@ -814,13 +975,12 @@ always @(posedge CLK) if (CE) begin
                 dct_bits_code_d <= dct_bits_code;
                 if (dct_bits_code > 8'h0f)
                     dct_qc <= dct_bits_code[3:0];
-                else if (dct_bits_code == 8'h0f) begin
-                    $warning("TODO: Zeros in DC clear columns");
-                end
+                // 0Fh (null run) is handled in the decode FSM.
             end
             DCTDS_AC_CODE: begin
                 dct_bits_code_d <= dct_bits_code;
-                dct_ac_zeros <= dct_ac_zeros + dct_bits_code[7:4];
+                if (~dct_null_code)
+                    dct_ac_zeros <= dct_ac_zeros + dct_bits_code[7:4];
             end
             DCTDS_DC_K: begin
                 if (dct_plane_y)
@@ -831,9 +991,19 @@ always @(posedge CLK) if (CE) begin
                     dct_dc_v <= dct_dc_v + $size(dct_dc_y)'(dct_bits_pop_mse);
             end
             DCTDS_AC_K: begin
-                dct_ac_val <= $size(dct_ac_val)'(dct_bits_pop_mse);
-                if (dct_bits_pop_mse == '0 && dct_ac_zeros == 4'd1)
-                    dct_ac_zeros <= 4'd15;
+                if (dct_null_code) begin
+                    // A null run resets the DC predictors.
+                    if (dcts == DCTS_Y00) begin
+                        dct_dc_y <= '0;
+                        dct_dc_u <= '0;
+                        dct_dc_v <= '0;
+                    end
+                end
+                else begin
+                    dct_ac_val <= $size(dct_ac_val)'(dct_bits_pop_mse);
+                    if (dct_bits_pop_mse == '0 && dct_ac_zeros == 4'd1)
+                        dct_ac_zeros <= 4'd15;
+                end
             end
             default: ;
         endcase
@@ -891,7 +1061,7 @@ logic [5:0] dct_zigzag_tbl [64] = '{
 assign dct_ictbl_widx = dct_zigzag_tbl[dct_ic_cnt];
 assign dct_ictbl_wd = $size(dct_ictbl_wd)'($signed(9'(dct_iq)) * dct_acdc);
 
-always @(posedge CLK) if (CE) begin
+always @(posedge CLK) if (DCE) begin
     if (dct_ictbl_we)
         dct_ictbl[dct_ictbl_widx[5:3]][dct_ictbl_widx[2:0]] <= dct_ictbl_wd;
 end
@@ -912,7 +1082,7 @@ always @* begin
     endcase
 end
 
-always @(posedge CLK) if (CE) begin
+always @(posedge CLK) if (DCE) begin
     dct_rwe <= dct_store_act;
     if (dct_store_plane_y)
         dct_raddr <= {dct_store_plane_ynn[0], dct_idy, dct_store_col, 
@@ -920,14 +1090,17 @@ always @(posedge CLK) if (CE) begin
     else
         dct_raddr <= {dct_idy, 1'b0, dct_store_col, 
                       dct_idx, 1'b1, dct_store_plane_v};
-    dct_rdata <= dct_idtbl[dct_idy][dct_idx];
+    if (dct_store_null)
+        dct_rdata <= dct_store_plane_y ? back_y : dct_store_plane_v ? back_v : back_u;
+    else
+        dct_rdata <= dct_idtbl[dct_idy][dct_idx];
 end
 
-always @(posedge CLK) if (CE) begin
+always @(posedge CLK) if (DCE) begin
     if (~dct_store_act) begin
         dct_idx <= '0;
         dct_idy <= '0;
-        dct_store_act <= idct_done;
+        dct_store_act <= idct_done | dct_null_trig;
     end
     else begin
         dct_idx <= dct_idx + 1'd1;
@@ -967,7 +1140,7 @@ logic [7:0] [IDW-1:0] idct_bufr2 [5];
 logic [7:0] [IDW-1:0] idct_bufrt [8];
 logic [5:0]           idct_step;
 
-always @(posedge CLK) if (CE) begin
+always @(posedge CLK) if (DCE) begin
     idct_input_done <= '0;
 
     if (~dec_act)
@@ -1298,13 +1471,23 @@ always @* begin
     end
 end
 
+wire dbg_to_disp = dbg_to[~rbsel];
+
 always @(posedge CLK) if (DCK) begin
     vo_vd <= '0;
     if (vo_hact)
         vo_vd <= vo_vd_p;
+`ifdef RAINBOW_DEBUG
+    if (dbg_to_disp & vo_hact_p)
+        vo_vd <= {8'd150, 8'd255, 8'd255};
+`endif
 end
 
+`ifdef RAINBOW_DEBUG
+assign VDMODE = (vo_vdmode & vo_valid) | dbg_to_disp;
+`else
 assign VDMODE = vo_vdmode & vo_valid;
+`endif
 assign VD = vo_vd;
 
 //////////////////////////////////////////////////////////////////////
@@ -1346,5 +1529,49 @@ always @* begin
         vo_rdata = RA_DI;
     end
 end
+
+`ifdef VERILATOR
+// Simulation log: RAINBOW strip state at each 16-line window end, printed
+// only when it changes.
+logic [6:0] dbg_rb_last = '1;
+always @(posedge CLK) begin
+    if (dec_resn & HSYNC_NEGEDGE & (v_cnt == 4'd15) &
+        ({rb_run, dec_act, si_end, si_hdr} != dbg_rb_last)) begin
+        dbg_rb_last <= {rb_run, dec_act, si_end, si_hdr};
+        $display("%t: RB act=%b end=%b hdr=%x", $time, dec_act, si_end, si_hdr);
+    end
+    if (~dec_resn & (dbg_rb_last[6] | (dbg_rb_last == '1))) begin
+        dbg_rb_last <= '0;
+        $display("%t: RB reset", $time);
+    end
+end
+`endif
+
+//////////////////////////////////////////////////////////////////////
+// Debug counters (free running)
+
+logic [7:0]     dbg_win_cnt, dbg_valid_cnt, dbg_hdr_cnt;
+logic           dbg_hdr_d;
+
+always @(posedge CLK) begin
+    if (~RESn) begin
+        dbg_win_cnt <= '0;
+        dbg_valid_cnt <= '0;
+        dbg_hdr_cnt <= '0;
+        dbg_hdr_d <= '0;
+    end
+    else begin
+        dbg_hdr_d <= si_hdr_det;
+        if (si_hdr_det & ~dbg_hdr_d)
+            dbg_hdr_cnt <= dbg_hdr_cnt + 1'd1;
+        if (dec_resn & HSYNC_NEGEDGE & (v_cnt == 4'd15)) begin
+            dbg_win_cnt <= dbg_win_cnt + 1'd1;
+            if (dec_act & si_end)
+                dbg_valid_cnt <= dbg_valid_cnt + 1'd1;
+        end
+    end
+end
+
+assign DBG = {dbg_win_cnt, dbg_valid_cnt, dbg_hdr_cnt, rb_run, 4'(dcts), 3'(sist)};
 
 endmodule

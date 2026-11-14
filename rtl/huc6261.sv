@@ -14,6 +14,7 @@ module huc6261
      input            CLK,
      input            CE,
      input            RESn,
+     input            HCROP,     // hide the horizontal border (option)
 
      input            CSn,
      input            WRn,
@@ -41,6 +42,7 @@ module huc6261
      output           DCKKR_NEGEDGE,
      input            MMC_VDMODE,
      input [23:0]     MMC_VD,
+     input [1:0]      MMC_VDL,   // KING BG layer of the pixel
      input            VPU_VDMODE,
      input [23:0]     VPU_VD,
 
@@ -56,6 +58,17 @@ module huc6261
 
 localparam [11:0] LEFT_BL_CLOCKS = 12'd457;
 localparam [11:0] DISP_CLOCKS = 12'd2160;
+// Border crop (5 MHz dot clock, 8 clocks per dot), measured on the HDMI
+// output: the RAINBOW picture has 9 border dots on the left and 5 on the
+// right; the KING picture starts one dot later. The first and last
+// RAINBOW columns are also slightly darker. Cropping 10 dots on the left
+// and 6 on the right shows 254 dots, with no border and no dark column.
+// Outside the picture, the hindmost color (palette entry 0) shows.
+localparam [11:0] CROP_LEFT_CLOCKS = 12'd80;
+localparam [11:0] CROP_RIGHT_CLOCKS = 12'd48;
+// The KING / RAINBOW picture starts 5 lines after the top of the display
+// window; the BIOS menu shows a colored bar there. Hide these lines too.
+localparam [8:0] CROP_TOP_LINES = 9'd5;
 localparam [11:0] LINE_CLOCKS = 12'd2730;
 localparam [11:0] HS_CLOCKS = 12'd192;
 localparam [11:0] HS_OFF = 12'd47;
@@ -132,6 +145,7 @@ logic [7:0]     vdc_sp_cpao, vdc_bg_cpao,
 logic [2:0]     pri_vdc_bg, pri_vdc_sp, pri_vpu,
                 pri_mmc_bg0, pri_mmc_bg1, pri_mmc_bg2, pri_mmc_bg3;
 logic [15:0]    ccr, ccr_next;
+logic [15:0]    cky, cku, ckv;   // RAINBOW chroma key: [15:8] max, [7:0] min
 ble_t           ble, ble_next;
 logic [15:0]    spbl, spbl_next;
 blxx_t          bl1a, bl1a_next, bl1b, bl1b_next,
@@ -172,6 +186,9 @@ always @(posedge CLK) if (CE) begin
         ccr_next <= '0;
         ble_next <= '0;
         spbl_next <= '0;
+        cky <= '0;
+        cku <= '0;
+        ckv <= '0;
         bl1a_next <= '0;
         bl1b_next <= '0;
         bl2a_next <= '0;
@@ -223,6 +240,12 @@ always @(posedge CLK) if (CE) begin
                             pri_mmc_bg2 <= DI[8+:3];
                             pri_mmc_bg3 <= DI[12+:3];
                         end
+                        5'h0a:
+                            cky <= DI[15:0];
+                        5'h0b:
+                            cku <= DI[15:0];
+                        5'h0c:
+                            ckv <= DI[15:0];
                         5'h0d:
                             ccr_next <= DI[15:0];
                         5'h0e:
@@ -258,8 +281,23 @@ always @* begin
         end
         1'b1: begin
             case (ar)
+                // Games read back R00 and change single bits (Team
+                // Innocent sets the layer enables this way); Mednafen
+                // returns all registers.
+                5'd00:
+                    dout[14:0] = cr_next;
+                5'd01:
+                    dout[8:0] = cpa;
                 5'd03:
                     dout[15:0] = cpdout;
+                5'd04:
+                    dout[15:0] = {vdc_sp_cpao, vdc_bg_cpao};
+                5'd05:
+                    dout[15:0] = {mmc_bg1_cpao, mmc_bg0_cpao};
+                5'd06:
+                    dout[15:0] = {mmc_bg3_cpao, mmc_bg2_cpao};
+                5'd07:
+                    dout[7:0] = vpu_cpao;
                 5'h08: begin
                     dout[0+:3] = pri_vdc_bg;
                     dout[4+:3] = pri_vdc_sp;
@@ -271,6 +309,12 @@ always @* begin
                     dout[8+:3] = pri_mmc_bg2;
                     dout[12+:3] = pri_mmc_bg3;
                 end
+                5'h0a:
+                    dout = cky;
+                5'h0b:
+                    dout = cku;
+                5'h0c:
+                    dout = ckv;
                 5'h0d:
                     dout = ccr_next;
                 5'h0e:
@@ -514,15 +558,29 @@ assign layers[0].cpe = ble_cpe_t'(vdc_spbg ? (ble.vdc_sp & {2{vdc_cce}})
 
 //////////////////////////////////////////////////////////////////////
 // MMC (KING) video input
-// TODO: Output and use front priority layer # from MMC
+// KING sends the front pixel of its four BG layers (KING priority) with
+// its layer number. The layer number selects the enable bit, priority,
+// palette offset and cellophane setting here (as Mednafen).
 
 logic [8:0]     mmc_cpa;
 logic [23:0]    mmc_vd;
 logic           mmc_en, mmc_key;
+logic [7:0]     mmc_cpao;
+logic [2:0]     mmc_pri;
+ble_cpe_t       mmc_cpe;
 
-assign mmc_en = cr.bmg[0];
+always @* begin
+    case (MMC_VDL)
+        2'd0: begin mmc_cpao = mmc_bg0_cpao; mmc_pri = pri_mmc_bg0; mmc_cpe = ble.mmc_bg0; end
+        2'd1: begin mmc_cpao = mmc_bg1_cpao; mmc_pri = pri_mmc_bg1; mmc_cpe = ble.mmc_bg1; end
+        2'd2: begin mmc_cpao = mmc_bg2_cpao; mmc_pri = pri_mmc_bg2; mmc_cpe = ble.mmc_bg2; end
+        default: begin mmc_cpao = mmc_bg3_cpao; mmc_pri = pri_mmc_bg3; mmc_cpe = ble.mmc_bg3; end
+    endcase
+end
 
-assign mmc_cpa = {mmc_bg0_cpao, 1'b0} + {1'b0, MMC_VD[7:0]};
+assign mmc_en = cr.bmg[MMC_VDL];
+
+assign mmc_cpa = {mmc_cpao, 1'b0} + {1'b0, MMC_VD[7:0]};
 
 always @* begin
     if (~MMC_VDMODE) begin // palette
@@ -535,12 +593,12 @@ always @* begin
     end
 end
 
-// MMC BG0
-assign layers[1].pri = pri_mmc_bg0;
+// MMC BG0-3
+assign layers[1].pri = mmc_pri;
 assign layers[1].key = mmc_key;
 assign layers[1].vd  = mmc_vd;
 assign layers[1].pal = ~MMC_VDMODE;
-assign layers[1].cpe = ble.mmc_bg0;
+assign layers[1].cpe = mmc_cpe;
 
 //////////////////////////////////////////////////////////////////////
 // VPU (RAINBOW) video input
@@ -553,13 +611,31 @@ assign vpu_en = cr.bg71;
 
 assign vpu_cpa = {vpu_cpao, 1'b0} + {2'b0, VPU_VD[6:0]};
 
+// YUV chroma key (as Mednafen): with all key registers zero, only
+// Y=U=V=0 is transparent; else a pixel inside all three [min, max]
+// ranges is transparent. No keying in 7.16 MHz dot mode.
+logic           vpu_ck_hit;
+
+always @* begin
+    vpu_ck_hit = '0;
+    if (~cr.dc7) begin
+        if (~|{cky, cku, ckv})
+            vpu_ck_hit = ~|VPU_VD[23:0];
+        else if ((cky[7:0] <= cky[15:8]) & (cku[7:0] <= cku[15:8]) &
+                 (ckv[7:0] <= ckv[15:8]))
+            vpu_ck_hit = (VPU_VD[16+:8] >= cky[7:0]) & (VPU_VD[16+:8] <= cky[15:8]) &
+                         (VPU_VD[8+:8]  >= cku[7:0]) & (VPU_VD[8+:8]  <= cku[15:8]) &
+                         (VPU_VD[0+:8]  >= ckv[7:0]) & (VPU_VD[0+:8]  <= ckv[15:8]);
+    end
+end
+
 always @* begin
     if (~VPU_VDMODE) begin // palette
         vpu_key = vpu_en & |VPU_VD[0+:8];
         vpu_vd = 24'(vpu_cpa);
     end
     else begin // YUV
-        vpu_key = '1; // TODO
+        vpu_key = vpu_en & ~vpu_ck_hit;
         vpu_vd = VPU_VD;
     end
 end
@@ -843,12 +919,12 @@ end
 
 // Blanking periods
 always @(posedge CLK) begin
-    if (h_cnt == LEFT_BL_CLOCKS)
+    if (h_cnt == LEFT_BL_CLOCKS + (HCROP ? CROP_LEFT_CLOCKS : 12'd0))
         hbl_ff <= '0;
-    else if (h_cnt == LEFT_BL_CLOCKS + DISP_CLOCKS)
+    else if (h_cnt == LEFT_BL_CLOCKS + DISP_CLOCKS - (HCROP ? CROP_RIGHT_CLOCKS : 12'd0))
         hbl_ff <= '1;
 
-    if (v_cnt == TOP_BL_LINES)
+    if (v_cnt == TOP_BL_LINES + (HCROP ? CROP_TOP_LINES : 9'd0))
         vbl_ff <= '0;
     else if (v_cnt == TOP_BL_LINES + DISP_LINES)
         vbl_ff <= '1;
@@ -886,5 +962,20 @@ always @(posedge CLK) if (DCK70) begin
     U <= pdo.u;
     V <= pdo.v;
 end
+
+`ifdef VERILATOR
+// Simulation log of register value changes ("V reg value"; palette data
+// port 02h omitted), as in the local Mednafen debug log.
+logic [15:0]    dbg_vlast [32];
+logic           dbg_vwr_d;
+initial for (int i = 0; i < 32; i++) dbg_vlast[i] = 16'hFFFF;
+always @(posedge CLK) begin
+    dbg_vwr_d <= ~CSn & ~WRn;
+    if (~CSn & ~WRn & ~dbg_vwr_d & A2 & (ar != 5'd2) & (dbg_vlast[ar] != DI)) begin
+        dbg_vlast[ar] <= DI;
+        $display("%t: V %02x %04x", $time, ar, DI);
+    end
+end
+`endif
 
 endmodule

@@ -146,6 +146,21 @@ logic [11:0]    sdbuf_baddr;
 logic [12:0]    sdbuf_addr;
 logic [7:0]     sdbuf_dbout;
 logic           sd_ack_d;
+logic           comm_pend;      // command waits for an open sector request
+
+// Data read pacing: one 2048-byte sector every 6.67 ms (150 sectors/s,
+// a 2x drive; Mednafen: 153600 B/s x 2, first sector one sector time
+// after the command). Without it, sectors arrive several times faster
+// than on hardware, and FMV code takes other paths (black movies).
+localparam int SECTOR_CLKS = 42954545 / 150;
+// Off: this simple per-sector delay (no read-ahead buffer) stalls the
+// Team Innocent story stream. A real drive reads ahead into a buffer.
+localparam bit READ_PACING = 1'b0;
+logic           rd_pace_req;
+logic [18:0]    rd_pace_cnt;
+
+// Test switch for the ABORT changes (1 = on).
+localparam bit ABORT_FIX = 1'b1;
 logic           cd_wr_d;
 
 wire            dataend = ((datapos + 1'd1) == datalen);
@@ -672,6 +687,9 @@ always @(posedge CLK) begin
         CD_WR <= '0;
         SD_LBA <= '0;
         SD_RD <= '0;
+        comm_pend <= '0;
+        rd_pace_req <= '0;
+        rd_pace_cnt <= '0;
 
         tst <= TS_IDLE;
         datalen <= '0;
@@ -684,7 +702,13 @@ always @(posedge CLK) begin
 
         case (tst)
             TS_IDLE:
-                if (COMM_SEND) begin
+                // A command that arrives while a sector request of an
+                // aborted read is still open waits until the request ends,
+                // so the old sector cannot complete the new command.
+                if (ABORT_FIX & (COMM_SEND | comm_pend) & (SD_RD | SD_ACK | sd_ack_d))
+                    comm_pend <= '1;
+                else if (COMM_SEND | comm_pend) begin
+                    comm_pend <= '0;
                     $display("fake_cd: COMMAND=%x", COMMAND);
                     blkcnt <= '0;
                     datapos <= '0;
@@ -753,6 +777,25 @@ always @(posedge CLK) begin
             default: ;
         endcase
 
+        // ABORT message (any message after ATN): the SCSI bridge goes to
+        // BUS FREE at once. It can arrive while we wait for the next
+        // sector of a read (the bridge accepts ATN when its FIFO is
+        // empty), so end the command in any state.
+        if (ABORT_FIX & MSGOUT_SEND & (tst != TS_IDLE) & (tst != TS_MSG_OUT)) begin
+            $display("fake_cd: ABORT in state %0d", tst);
+            CD_WR <= '0;
+            rd_pace_req <= '0;
+            tst <= TS_IDLE;
+        end
+
+        if (rd_pace_cnt != '0)
+            rd_pace_cnt <= rd_pace_cnt - 1'd1;
+        else if (rd_pace_req) begin
+            rd_pace_req <= '0;
+            rd_pace_cnt <= READ_PACING ? 19'(SECTOR_CLKS) : '0;
+            SD_RD <= '1;
+        end
+
         if ((tst == TS_CMD) & cmd_start) begin
             STATUS <= STATUS_GOOD;
             datalen <= '0;
@@ -790,7 +833,8 @@ always @(posedge CLK) begin
                                        - 1'd1);
                             SD_LBA <= {COMMAND[(2*8)+:8], COMMAND[(3*8)+:8],
                                        COMMAND[(4*8)+:8], COMMAND[(5*8)+:8]};
-                            SD_RD <= '1;
+                            rd_pace_req <= '1;
+                            rd_pace_cnt <= READ_PACING ? 19'(SECTOR_CLKS) : '0;
                         end
                         else
                             cmd_done <= '1;
@@ -848,7 +892,7 @@ always @(posedge CLK) begin
             case (COMMAND[0+:8])
                 CMDOP_READ_10: begin
                     SD_LBA <= SD_LBA + 1'd1;
-                    SD_RD <= '1;
+                    rd_pace_req <= '1;
                 end
                 default: ;
             endcase

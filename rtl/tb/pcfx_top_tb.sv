@@ -24,6 +24,8 @@
 //   +dump_sdram    Write sdram.hex at the end of the run
 //   +press_run_ms=N  Press JP1 RUN at N ms, for 20 ms
 //   +press_b1_ms=N   Press JP1 button I at N ms, for 20 ms
+//   +presses=LIST    Press buttons in order. LIST is BTN:MS,BTN:MS,...
+//                    with BTN = run, sel, b1 or b2; each press is 20 ms
 
 `ifdef PCFX_TOP_TB_CD
 import "DPI-C" function bit pcfx_mount_cd();
@@ -149,6 +151,7 @@ pcfx_top #(.CLK_RAM_MHZ(CLK_RAM_MHZ)) pcfx_top
     .bmp_eject_rom(bmp_eject_rom),
 
     .HMI(hmi),
+    .HCROP(1'b0),
 
     .SDRAM_CKE(SDRAM_CKE),
     .SDRAM_A(SDRAM_A),
@@ -162,6 +165,8 @@ pcfx_top #(.CLK_RAM_MHZ(CLK_RAM_MHZ)) pcfx_top
     .SDRAM_nWE(SDRAM_nWE),
 
     .ERROR(),
+    .DBG_TXD(),
+    .DBG_RXD(1'b1),
 
 	.ce_pix(pce),
 
@@ -763,6 +768,47 @@ int press_ms;
         $display("Pressing JP1.B1....");
         hmi.jp1.b[1] = '1;
         #(20e3) hmi.jp1.b[1] = '0;
+    end
+end
+
+initial begin
+string  list;
+int     i, ms, last_ms;
+string  btn;
+    if ($value$plusargs("presses=%s", list)) begin
+        @(running) ;
+        last_ms = 0;
+        i = 0;
+        while (i < list.len()) begin
+            btn = "";
+            while (i < list.len() && list.getc(i) != ":") begin
+                btn = {btn, string'(list.getc(i))};
+                i++;
+            end
+            i++;
+            ms = 0;
+            while (i < list.len() && list.getc(i) != ",") begin
+                ms = ms * 10 + int'(list.getc(i)) - 48;
+                i++;
+            end
+            i++;
+            if (ms > last_ms)
+                #((ms - last_ms) * 1e3) ;
+            $display("%t: Pressing JP1.%s", $time, btn);
+            case (btn)
+                "run": hmi.jp1.run = '1;
+                "sel": hmi.jp1.select = '1;
+                "b1":  hmi.jp1.b[1] = '1;
+                "b2":  hmi.jp1.b[2] = '1;
+                default: $display("Unknown button %s", btn);
+            endcase
+            #(20e3) ;
+            hmi.jp1.run = '0;
+            hmi.jp1.select = '0;
+            hmi.jp1.b[1] = '0;
+            hmi.jp1.b[2] = '0;
+            last_ms = ms + 20;
+        end
     end
 end
 

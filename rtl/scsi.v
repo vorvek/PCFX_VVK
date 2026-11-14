@@ -97,6 +97,8 @@ wire FULL;
 wire EMPTY;
 reg FIFO_RD_REQ;
 reg FIFO_WR_REQ;
+reg FIFO_CLR;    // clear the data FIFO after an ABORT
+localparam ABORT_FIX = 1'b1;  // test switch for the ABORT change
 reg [7:0] FIFO_D;
 wire [7:0] FIFO_Q;
 reg CD_WR_OLD;
@@ -141,12 +143,12 @@ assign CD_READY = ~FULL;
 
 // Keep this small to speed up ATN response.
 fifo1 #(.DSIZE(8), .ASIZE(6)) FIFO(
-    .WRST_N(RESET_N),
+    .WRST_N(RESET_N & ~FIFO_CLR),
     .WCLK(CLK),
     .WDATA(FIFO_D),
     .WINC(FIFO_WR_REQ),
     .WFULL(FULL),
-    .RRST_N(RESET_N),
+    .RRST_N(RESET_N & ~FIFO_CLR),
     .RCLK(CLK),
     .RINC(FIFO_RD_REQ),
     .REMPTY(EMPTY),
@@ -207,6 +209,7 @@ fifo1 #(.DSIZE(8), .ASIZE(6)) FIFO(
       COMM_OUT <= 1'b0;
       DATA_OUT <= 1'b0;
       MSGOUT_OUT <= 1'b0;
+      FIFO_CLR <= 1'b0;
       CD_DATA_END <= 1'b0;
       FIFO_RD_REQ <= 1'b0;
       if(RST_N == 1'b0) begin
@@ -428,6 +431,8 @@ fifo1 #(.DSIZE(8), .ASIZE(6)) FIFO(
               IO_Nr <= 1'b1;
               REQ_Nr <= 1'b1;
               MSGOUT_OUT <= 1'b1;
+              // Drop the rest of the aborted data transfer.
+              FIFO_CLR <= ABORT_FIX;
               SP <= SP_FREE;
             end
             else begin

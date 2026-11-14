@@ -74,9 +74,12 @@ module mach
    input [15:0]  CD_SDBUF_DOUT,
 
    input         hmi_t HMI,
+   input         HCROP,
 
    output [31:0] A,
    output reg    ERROR,
+   output        DBG_TXD,   // debug serial output
+   input         DBG_RXD,   // debug serial input (controller 1 buttons)
 
    output        VID_PCE,
    output [7:0]  VID_Y,
@@ -192,6 +195,7 @@ wire            mmc_scsi_doe;
 wire            mmc_vdmode;
 logic [23:0]    mmc_vd;
 logic           mmc_vde;
+logic [1:0]     mmc_vdl;
 
 logic [7:0]     scsi_data;
 wire            scsi_atnn, scsi_bsyn, scsi_ackn, scsi_rstn,  scsi_msgn,
@@ -308,6 +312,7 @@ fx_ga ga
 huc6261 vce
     (
      .RESn(RESn),
+     .HCROP(HCROP),
      .CLK(CLK),
      .CE(CE),            // TODO: Divide .CE by 5 for 5MHz pixel clock
 
@@ -334,6 +339,7 @@ huc6261 vce
      .DCKKR_NEGEDGE(dckkr_negedge),
      .MMC_VDMODE(mmc_vdmode),
      .MMC_VD(mmc_vd),
+     .MMC_VDL(mmc_vdl),
      .VPU_VDMODE(vpu_vdmode),
      .VPU_VD(vpu_vd),
 
@@ -454,13 +460,15 @@ dpram #(.addr_width(16), .data_width(16), .disable_value(0)) vram1
      .cs_b('1)
      );
 
+wire [31:0]     vpu_dbg;
+
 huc6271 vpu
    (
     .CLK(CLK),
     .CE(CE),
     .RESn(RESn),
     
-    .A(mem16_a[4:2]),
+    .A(mem16_a[4:1]),
     .DI(cpu_d_o[15:0]),
     .DO(vpu_do),
     .CSn(vpu_csn),
@@ -486,7 +494,8 @@ huc6271 vpu
     .DCK(dckkr),
     .HSYNC_NEGEDGE(hs_negedge),
     .VDMODE(vpu_vdmode),
-    .VD(vpu_vd)
+    .VD(vpu_vd),
+    .DBG(vpu_dbg)
     );
 
 dpram #(.addr_width(13), .data_width(8), .disable_value(0)) rrama
@@ -523,6 +532,8 @@ dpram #(.addr_width(13), .data_width(8), .disable_value(0)) rramb
      .cs_b('1)
      );
 
+wire [7:0]      mmc_dbg_isr;
+
 huc6272 mmc
     (
      .CLK(CLK),
@@ -537,6 +548,7 @@ huc6272 mmc
      .RDn(ga_rdn),
      .BUSYn(mmc_busyn),
      .IRQn(mmc_irqn),
+     .DBG_ISR(mmc_dbg_isr),
 
      .MA_A(KRAMA_A),
      .MA_DI(KRAMA_DI),
@@ -563,6 +575,7 @@ huc6272 mmc
      .VDMODE(mmc_vdmode),
      .VD(mmc_vd),
      .VDE(mmc_vde),
+     .VDL(mmc_vdl),
 
      .SCSI_DI(scsi_data),
      .SCSI_DO(mmc_scsi_do),
@@ -844,12 +857,20 @@ cdda cdda
 //////////////////////////////////////////////////////////////////////
 // K-port interface
 
+core_pkg::joypad_t dbg_jp;
+hmi_t           hmi_dbg;
+
+always @* begin
+    hmi_dbg = HMI;
+    hmi_dbg.jp1 = HMI.jp1 | dbg_jp;
+end
+
 hmi2kp hmi2kp
     (
      .CLK(CLK),
      .RESn(RESn),
 
-     .HMI(HMI),
+     .HMI(hmi_dbg),
 
      .KP_LATCH(kp_latch),
      .KP_CLK(kp_clk),
@@ -889,5 +910,41 @@ end
 
 always @(posedge ERROR)
     $finish(1);
+
+//////////////////////////////////////////////////////////////////////
+// Debug serial output
+
+dbg_uart dbg_uart
+   (
+    .CLK(CLK),
+    .RESn(RESn),
+    .CPU_A(cpu_a),
+    .CPU_DI(cpu_d_i),
+    .CPU_DO(cpu_d_o),
+    .CPU_ST(cpu_st),
+    .CPU_RW(cpu_rw),
+    .CPU_BCYSTn(cpu_bcystn),
+    .CPU_READYn(cpu_readyn),
+    .CE(CE),
+    .ERROR(ERROR),
+    .SCSI_CMD(scsi_cd_command),
+    .SCSI_CMD_SEND(scsi_cd_comm_send),
+    .SCSI_STAT(scsi_cd_status),
+    .SCSI_STAT_GET(scsi_cd_stat_get),
+    .SD_RD(fcd_sd_rd),
+    .KING_ISR(mmc_dbg_isr),
+    .RB_DBG(vpu_dbg),
+    .VCE_CSn(vce_csn),
+    .VPU_CSn(vpu_csn),
+    .IO_WRn(ga_wrn),
+    .IO_A(mem16_a[4:1]),
+    .IO_DI(cpu_d_o[15:0]),
+    .VPU_DCK(dckkr),
+    .VPU_VDMODE(vpu_vdmode),
+    .VPU_VD(vpu_vd),
+    .TXD(DBG_TXD),
+    .RXD(DBG_RXD),
+    .JP(dbg_jp)
+    );
 
 endmodule

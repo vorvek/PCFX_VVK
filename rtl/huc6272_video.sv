@@ -44,7 +44,8 @@ module huc6272_video
     input         VSYNC_NEGEDGE,
     output        VDMODE, // 0=palette, 1=YUV
     output [23:0] VD, // [7:0] = palette data / [23:0] = {Y,U,V}
-    output        VDE
+    output        VDE,
+    output [1:0]  VDL  // BG layer number of the pixel
     );
 
 logic [9:0]         row, col;
@@ -181,6 +182,7 @@ logic               mdsa, mdsb;
 logic [1:0]         mdla, mdlb;
 logic               mdbnca, mdbncb;
 logic [2:0]         mdcca, mdccb;
+logic [3:0]         mdpba, mdpbb;
 logic [15:0]        mda, mdb;
 logic [15:0]        mdbatd;
 
@@ -219,6 +221,7 @@ huc6272_fetch vfea
     .MDL(mdla),
     .MDBnC(mdbnca),
     .MDCC(mdcca),
+    .MDPB(mdpba),
     .MD(mda)
     );
 
@@ -257,6 +260,7 @@ huc6272_fetch vfeb
     .MDL(mdlb),
     .MDBnC(mdbncb),
     .MDCC(mdccb),
+    .MDPB(mdpbb),
     .MD(mdb)
     );
 
@@ -300,10 +304,14 @@ huc6272_bgm #(i) bgm
     .MDSA(mdsa),
     .MDLA(mdla),
     .MDCCA(mdcca),
+    .MDPBA(mdpba),
+    .MDBnCA(mdbnca),
     .MDA(mda),
     .MDSB(mdsb),
     .MDLB(mdlb),
     .MDCCB(mdccb),
+    .MDPBB(mdpbb),
+    .MDBnCB(mdbncb),
     .MDB(mdb),
 
     .PDMODE(bg_pdmode[i]),
@@ -351,5 +359,6 @@ assign bgp_pde = bg_pde[bgp_sel];
 assign VDMODE = bgp_pdmode;
 assign VD = bgp_pd;
 assign VDE = bgp_pde;
+assign VDL = bgp_sel;
 
 endmodule

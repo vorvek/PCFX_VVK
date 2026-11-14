@@ -24,10 +24,14 @@ module huc6272_bgm
     input         MDSA,
     input [1:0]   MDLA,
     input [2:0]   MDCCA,
+    input [3:0]   MDPBA,
+    input         MDBnCA,
     input [15:0]  MDA,
     input         MDSB,
     input [1:0]   MDLB,
     input [2:0]   MDCCB,
+    input [3:0]   MDPBB,
+    input         MDBnCB,
     input [15:0]  MDB,
 
     output        PDMODE,
@@ -57,7 +61,13 @@ logic               mds;
 logic [1:0]         mdl;
 logic [2:0]         mdcc;
 logic [15:0]        md;
+logic [3:0]         mpb;
 
+// Block (BAT) modes: the BAT palette bank selects 4 or 16 colors.
+wire format_blk = rf_bgm.bgp[LAYER].format[3];
+
+assign mpb = cgbank ? MDPBB : MDPBA;
+wire mbnc = cgbank ? MDBnCB : MDBnCA;
 assign mds = cgbank ? MDSB : MDSA;
 assign mdl = cgbank ? MDLB : MDLA;
 assign mdcc = cgbank ? MDCCB : MDCCA;
@@ -65,9 +75,10 @@ assign md = cgbank ? MDB : MDA;
 
 logic               cgfce;
 logic [2:0]         pdwa, pdra;
-logic [18:0]        pdrout;
+logic [22:0]        pdrout;
 logic [2:0]         pdcc;
-logic [18:0]        cgrd_in;
+logic [22:0]        cgrd_in;
+logic [3:0]         cgpb;
 logic [2:0]         cgcol, cgccnt, cgcc;
 logic [31:0]        cgrd;
 logic               cgra;
@@ -79,7 +90,11 @@ logic               cgpdeo;
 
 wire cgrce = DCK;
 
-assign cgfce = mds & (mdl == LAYER);
+// Only CG words are pixel data. A BAT word of this layer on the same bank
+// (for example BG1 with BAT and CG in bank B, but CG fetch slots only in
+// the bank A program, as Team Innocent's hangar) must not be drawn;
+// Mednafen then shows the layer as transparent.
+assign cgfce = mds & (mdl == LAYER) & ~mbnc;
 
 // Pixel data buffer
 // Up to 8x 16-bit words arrive every 8x pixel clocks.
@@ -88,11 +103,11 @@ assign cgfce = mds & (mdl == LAYER);
 // CG column (valid for rotated) is paired with the pixel data.
 // Zero output when MPSW=0, matching Mednafen
 //
-dpram #(.addr_width(3), .data_width(19), .disable_value('0)) pdram
+dpram #(.addr_width(3), .data_width(23), .disable_value('0)) pdram
    (
     .clock(CLK),
     .address_a(pdwa),
-    .data_a({mdcc, md}),
+    .data_a({mpb, mdcc, md}),
     .enable_a(1'b1),
     .wren_a(cgfce),
     .q_a(),
@@ -145,8 +160,9 @@ always @(posedge CLK) begin
             end
             else begin
                 cgrd <= {16'b0, cgrd_in[15:0]};
-                // CG column is split out here
+                // CG column and palette bank are split out here
                 cgcol <= cgrd_in[18:16];
+                cgpb <= cgrd_in[22:19];
             end
         end
     end
@@ -173,9 +189,24 @@ end
 
 assign cgcc = rotate ? cgcol : cgccnt;
 
+logic [1:0]         cgv2;
+logic [3:0]         cgv4;
+
 always @* begin
+    cgv2 = cgrd[(3'd7 - cgcc) * 2 +: 2];
+    cgv4 = cgrd[(2'd3 - cgcc[1:0]) * 4 +: 4];
+
     cgpd = cgpdm ? PD_BLACK : '0;
     if (render_dd) begin
+        // Pixel order as Mednafen (king.cpp DRAWBG8x1_*): leftmost pixel
+        // in the most significant bits. Value 0 is transparent.
+        if (format_clr_4 & (cgv2 != '0))
+            cgpd[0+:8] = format_blk ? {2'b0, cgpb, cgv2} : {6'b0, cgv2};
+        if (format_clr_16 & (cgv4 != '0))
+            cgpd[0+:8] = format_blk ? {cgpb, cgv4} : {4'b0, cgv4};
+        if (format_clr_64k & (cgrd[15:8] != '0))
+            // 64K: Y 8 bits, U 4 bits, V 4 bits
+            cgpd = {cgrd[15:8], cgrd[7:4], 4'b0, cgrd[3:0], 4'b0};
         if (format_clr_256) begin
             cgpd[0+:8] = ~cgcc[0] ? cgrd[8+:8] : cgrd[0+:8];
         end

@@ -14,6 +14,7 @@ module huc6272_cpuif
     input [2:1]   A,
     input [15:0]  DI,
     output [15:0] DO,
+    output [7:0]  DBG_ISR,
     input         CSn,
     input         WRn,
     input         RDn,
@@ -467,6 +468,7 @@ wire sound_im = 1'b1; // multiple sources are individually masked
 assign isr = {1'b0, scsibk_if, scdma_if, sbcode_if, raster_if, sound_if, busy_if, 1'b0};
 assign imr = {1'b0, scsibk_im, scdma_im, sbcode_im, raster_im, sound_im, 1'b0, 1'b0};
 assign IRQn = ~|(isr & imr);
+assign DBG_ISR = isr;
 
 always @* begin
     kra = '0;
@@ -482,5 +484,21 @@ assign M_DO = krd;
 assign M_BE = '1;
 assign M_WR = krwr_act;
 assign M_REQ = krrd_act | krwr_act;
+
+`ifdef VERILATOR
+// Simulation log of KING register value changes, in the same form as the
+// local Mednafen debug log ("K reg msh value"; KRAM data port 0Eh omitted).
+logic [15:0]    dbg_klast [128][2];
+logic           dbg_kwr_d;
+initial for (int i = 0; i < 128; i++) begin dbg_klast[i][0] = 16'hFFFF; dbg_klast[i][1] = 16'hFFFF; end
+always @(posedge CLK) if (CE) begin
+    dbg_kwr_d <= ~CSn & ~WRn;
+    if (~CSn & ~WRn & ~dbg_kwr_d & A[2] & (rsel != 7'h0E) &
+        (dbg_klast[rsel][A[1]] != DI)) begin
+        dbg_klast[rsel][A[1]] <= DI;
+        $display("%t: K %02x %0d %04x", $time, rsel, A[1], DI);
+    end
+end
+`endif
 
 endmodule

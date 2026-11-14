@@ -45,6 +45,7 @@ module huc6272_fetch
     output [1:0]  MDL,
     output        MDBnC,
     output [2:0]  MDCC,
+    output [3:0]  MDPB, // palette bank of the CG word (block modes)
     output [15:0] MD
     );
 
@@ -113,6 +114,7 @@ logic               mpe_ren;
 logic [1:0]         mpe_layer;
 logic               mpe_bnc;
 logic [2:0]         mpe_cgcol;
+logic [3:0]         mpe_pb;
 
 assign mpe_d = (rf_bgm.mpsw & FETCH) ? MPR : 9'h100;
 always @*
@@ -161,11 +163,21 @@ logic [17:0] size_off;
             default: ;
         endcase
     end
+    // Word address as Mednafen (king.cpp DRAWBG8x1_MAC): 1/2/4/8 words
+    // per 8 pixels for 4/16/256/64K-16M colors. Dot modes index the
+    // bitmap by pixel; block modes use the BAT character (8 rows).
     mpe_cgaddr = '0;
     case (mpe_bgp.format)
+        BGF_INT_DOT_4:   mpe_cgaddr[16:0] = 17'(size_off[17:3]);
+        BGF_INT_DOT_16:  mpe_cgaddr[16:0] = 17'({size_off[17:3], cgoff[0]});
         BGF_INT_DOT_256: mpe_cgaddr[16:0] = {size_off[17:3], cgoff[1:0]};
+        BGF_INT_DOT_64K,
         BGF_INT_DOT_16M: mpe_cgaddr[16:0] = {size_off[16:3], cgoff[2:0]};
+        BGF_EXT_BLK_4:   mpe_cgaddr[16:0] = 17'({BATD[11:0], row[2:0]});
+        BGF_EXT_BLK_16:  mpe_cgaddr[16:0] = 17'({BATD[11:0], row[2:0], cgoff[0]});
         BGF_EXT_BLK_256: mpe_cgaddr[16:0] = {BATD[11:0], row[2:0], cgoff[1:0]};
+        BGF_EXT_BLK_64K,
+        BGF_EXT_BLK_16M: mpe_cgaddr[16:0] = 17'({BATD[11:0], row[2:0], cgoff[2:0]});
         default: ;
     endcase
 endfunction
@@ -196,6 +208,7 @@ always @(posedge CLK) begin
         // complete data fetch.
         mpe_ra <= mpe_addr(mpe_d);
         mpe_cgcol <= sag_col[2:0];
+        mpe_pb <= BATD[15:12];
     end
 end
 
@@ -238,6 +251,7 @@ assign MDS = mds;
 assign MDL = mdl;
 assign MDBnC = mdbnc;
 assign MDCC = mpe_cgcol;
+assign MDPB = mpe_pb;
 assign MD = M_DI;
 
 endmodule

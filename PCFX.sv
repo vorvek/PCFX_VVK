@@ -180,7 +180,7 @@ module emu
 
 assign ADC_BUS  = 'Z;
 assign USER_OUT = '1;
-assign {UART_RTS, UART_TXD, UART_DTR} = 0;
+assign {UART_RTS, UART_DTR} = 0;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 assign {DDRAM_CLK, DDRAM_BURSTCNT, DDRAM_ADDR, DDRAM_DIN, DDRAM_BE, DDRAM_RD, DDRAM_WE} = '0;  
 
@@ -204,7 +204,7 @@ assign BUTTONS = 0;
 // 0         1         2         3          4         5         6
 // 01234567890123456789012345678901 23456789012345678901234567890123
 // 0123456789ABCDEFGHIJKLMNOPQRSTUV 0123456789ABCDEFGHIJKLMNOPQRSTUV
-// XXXX   XXXXXXXXXXXX  XX
+// XXXX   XXXXXXXXXXXXX XX
 
 `include "build_id.v" 
 localparam CONF_STR = {
@@ -221,6 +221,7 @@ localparam CONF_STR = {
 	"d4P1O[12],Vertical Crop,Disabled,216p(5x);",
 	"d4P1O[16:13],Crop Offset,0,2,4,8,10,12,-12,-10,-8,-6,-4,-2;",
 	"P1O[18:17],Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
+	"P1O[19],Border,Hidden,Visible;",
 
     "P2,Backup RAM & ROM;",
     "P2-;",
@@ -408,6 +409,7 @@ pcfx_top #(.CLK_RAM_MHZ(CLK_RAM_MHZ))  pcfx_top
     .bmp_eject_rom(status[9]),
 
     .HMI(hmi),
+    .HCROP(~status[19]),
 
     .SDRAM_CKE(SDRAM_CKE),
     .SDRAM_A(SDRAM_A),
@@ -421,6 +423,8 @@ pcfx_top #(.CLK_RAM_MHZ(CLK_RAM_MHZ))  pcfx_top
     .SDRAM_nWE(SDRAM_nWE),
 
     .ERROR(error),
+    .DBG_TXD(UART_TXD),
+    .DBG_RXD(UART_RXD),
 
 	.ce_pix(ce_pix),
 

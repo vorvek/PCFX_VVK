@@ -79,8 +79,10 @@ assign dma_req_set = rf_scsi.dma_mode & phase_match &
 assign dma_req_clr = rf_scsi.dma_mode &
                      (dma_rxbuf_rd | rf_scsi.rxbuf_rd | rf_scsi.txbuf_wr);
 
+// Clearing DMA mode (REG.2 bit 1) ends any transfer and clears DRQ
+// (Mednafen king.cpp SCSI_Reg2_Write).
 always @(posedge CLK) if (CE) begin
-    if (~RESn) begin
+    if (~RESn | ~rf_scsi.dma_mode) begin
         dma_req <= '0;
     end
     else begin

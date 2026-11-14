@@ -21,6 +21,7 @@ module huc6272
      input         RDn,
      output        BUSYn,
      output        IRQn,
+     output [7:0]  DBG_ISR,    // interrupt status (debug)
 
 `ifdef HUC6272_DMC_ENABLE
 
@@ -76,6 +77,7 @@ module huc6272
      output        VDMODE, // 0=palette, 1=YUV
      output [23:0] VD, // [7:0] = palette data / [23:0] = {Y,U,V}
      output        VDE, // data enable (not in blanking)
+     output [1:0]  VDL, // BG layer number of the pixel
 
      // SCSI (CD-ROM) interface
      input [7:0]   SCSI_DI,
