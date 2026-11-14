@@ -121,15 +121,28 @@ dpram #(.addr_width(3), .data_width(23), .disable_value('0)) pdram
     .cs_b(rf_bgm.mpsw)
     );
 
+// Valid bit per buffer word. A word not written on this line (no CG slot
+// for this layer) reads as 0, transparent as in Mednafen, not old data.
+logic [7:0]         pdvalid;
+logic [2:0]         pdra_d;
+logic [22:0]        pdrq;
+
+always @(posedge CLK)
+    pdra_d <= pdra;
+
+assign pdrq = pdvalid[pdra_d] ? pdrout : '0;
+
 always @(posedge CLK) begin
     if (~RESn | HSYNC_NEGEDGE) begin
         pdwa <= '0;
         pdra <= '0;
         pdcc <= '0;
+        pdvalid <= '0;
     end
     else begin
         if (cgfce) begin
             pdwa <= pdwa + 1'd1;
+            pdvalid[pdwa] <= 1'b1;
         end
         if (RENDER & cgrce) begin
             if ((format_clr_4   & &pdcc[2:0]) |
@@ -151,12 +164,12 @@ always @(posedge CLK) begin
     end
     else if (cgrce) begin
         render_d <= RENDER;
-        cgrd_in <= pdrout;
+        cgrd_in <= pdrq;
         if (render_d) begin
             if (format_clr_16m) begin
                 // Each 16M YUV pixel spans two 16-bit words
                 if (cgra)
-                    cgrd <= {cgrd_in[15:0], pdrout[15:0]};
+                    cgrd <= {cgrd_in[15:0], pdrq[15:0]};
             end
             else begin
                 cgrd <= {16'b0, cgrd_in[15:0]};

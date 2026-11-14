@@ -348,8 +348,12 @@ always @* begin
     end
 end
 
-assign bgp_pdmode = bg_pdmode[bgp_sel];
-assign bgp_pd = bg_pd[bgp_sel];
+// No opaque layer with priority 1-7: output a transparent pixel. Mednafen
+// does not draw a layer with priority 0 (Team Innocent hangar, R12 = 0).
+wire bgp_none = (bgp_pri == '0);
+
+assign bgp_pdmode = bgp_none ? 1'b0 : bg_pdmode[bgp_sel];
+assign bgp_pd = bgp_none ? '0 : bg_pd[bgp_sel];
 assign bgp_pde = bg_pde[bgp_sel];
 
 
