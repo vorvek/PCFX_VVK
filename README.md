@@ -1,76 +1,56 @@
-# [NEC PC-FX](https://en.wikipedia.org/wiki/PC-FX) core for [MISTer Platform](https://github.com/MiSTer-devel/Main_MiSTer/wiki)
+This is a fork of [MiSTer-devel/PCFX_MiSTer](https://github.com/MiSTer-devel/PCFX_MiSTer) that aims to play Team Innocent: The Point of No Return. Other games may become playable as a side effect.
+I don't have a PC-FX, so most of the extra work comes from Mednafen, MAME and what little documentation there is online about the chips of this console.
 
-This is an emulator of the NEC PC-FX video game console.
+* Not accurate - Many changes are best guess.
+* AI used during development.
+* Any changes on this fork are free to take upstream, but due to the first two points, I wouldn't do it.
 
 
-## Hardware Requirements
-SDRAM of any size is required.  (Clock rate is ~86 MHz.)
+# NEC PC-FX core for MiSTer (PCFX_VVK fork)
 
-
-## Features
-* CUE+BIN and CHD format support
-* Internal backup (save) and external FX-BMP RAM
-* Automatic backup RAM mounted for each game
-* Load an external FX-BMP ROM
-* Two game controllers
+Based on the `dev` branch of [MiSTer-devel/PCFX_MiSTer](https://github.com/MiSTer-devel/PCFX_MiSTer) (release 20260912 plus the later KING BG1-BG3 and scrolling work).
 
 
 ## Installation
 
-- Build my fork of [Main\_MiSTer, branch pcfx](https://github.com/ReverendGumby/Main_MiSTer/tree/pcfx) (adds CD support).  Or, use the pre-built binary in `releases/pcfx/`.
-- Copy files to the SD card:
-   - `MiSTer` (main binary) to `/` (root)
-   - Latest *.rbf: from `releases/` to `_Console/`
-   - PC-FX ROM BIOS to `games/PCFX/boot.rom`
+Same as upstream:
 
-Core tested with ROM `pcfx.rom` (MD5 sum 08e36edbea28a017f79f8d4f7ff9b6d7).  The shortintro patch from [PC-FX\_Bios\_Patches](https://github.com/pcfx-devel/PC-FX_Bios_Patches.git) also works.
-
-
-## Usage
-
-When you load a CD, a .sav file of the same name as the CD is automatically mounted and loaded as internal backup RAM.  An empty, formatted RAM is created if needed.
-
-If the MiSTer user LED[0] turns on, the core has encountered a fatal error:
-
-- CPU: NMI (Non-Maskabable Interrupt) taken
-- CPU: HALT instruction executed
+- The core needs the PC-FX build of Main from [ReverendGumby/Main_MiSTer, branch pcfx](https://github.com/ReverendGumby/Main_MiSTer/tree/pcfx) for CD support (a pre-built binary is in `releases/pcfx/`).
+- Copy the core RBF to `_Console/` and the PC-FX BIOS to `games/PCFX/boot.rom`. Tested with `pcfx.rom` (MD5 08e36edbea28a017f79f8d4f7ff9b6d7).
+- SDRAM of any size is required.
+- A `.sav` file with the name of the CD is mounted as backup RAM.
 
 
-## Development status
+## Changes from upstream
 
-### Phase 1: Make it work (current)
+Video output:
+- Standard MiSTer video processing: scandoubler and filters, HDMI scaling options, analog and direct video.
+- OSD option "Border": hides the border around the 256-dot picture (left, right and the 5 lines above the picture). Default: hidden.
+- The screen is black (not green) while all layers are off, for example at reset.
 
-The CPU is definitely not cycle-accurate.  Available documentation is not consistent or clear enough for me to figure out all details of the 5-stage pipeline and its interlocks.
+CD:
+- CD-DA playback (NEC commands D8-DE and SCSI-2 audio commands), with the SOUNDBOX output mixer and ADPCM volumes.
+- ABORT messages during a data read end the command at once, and the bridge FIFO is cleared.
 
-Original hardware has three async. DRAMs that operate in parallel: the system RAM and the two KING RAMs.  All three are emulated using the MiSTer SDRAM module.  To support this, I wrote a multi-bank SDRAM controller.  Each DRAM is mapped to a separate SDRAM bank; because accesses to different banks can be interleaved, we can approximate parallel DRAM access.  The KING RAMs source BG video data at pixel clock rate, and so they are given priority over system RAM.  As such, CPU memory timing is not accurately reproduced.
+RAINBOW (HuC6271):
+- Runs of null macroblocks (DC code 0Fh) and the null color registers.
+- Control register SRT (reset / run).
+- Faster DCT decode, block header search as Mednafen, and a decoder reset for each 16-line strip.
 
-Where documentation for major subsystems was lacking (e.g., HuC6271 RAINBOW), the software multi-system emulator [Mednafen](https://mednafen.github.io) was referenced to fill the gaps.
+KING (HuC6272) and HuC6261:
+- KING tells the HuC6261 which BG layer each pixel comes from, for the layer enable, priority, palette offset and cellophane setting.
+- More BG color formats: 4 and 16 colors (dot and block mode, with the BAT palette bank) and 64K colors (not verified in a game yet).
+- HuC6261: R00, R01 and R04-R07 can be read back (games change single layer bits this way); RAINBOW chroma key (R0A-R0C).
+- KING RAM is cleared at core load and at each reset, so no old picture shows.
 
-### Games
-
-- Playable
-   - [Return To Zork](https://en.wikipedia.org/wiki/Return_to_Zork)
-- Unknown
-   - .. everything else
+Other:
+- PC-FX timer (I/O F00h-FC0h) and its interrupt.
+- A debug serial port on the HPS UART (`/dev/ttyS1`) for development: it logs CD commands and other events, and it accepts controller presses.
 
 
-## TODOs
+## Not done
 
-- Video
-   - HuC6261 (NEW Iron Guanyin)
-      - Mask border pixels
-      - YUV chroma key
-   - Huc6272 (KING)
-      - BG1-BG3
-      - BG subscreens
-      - Scrolling
-      - Some color formats
-   - Analog output, direct video output
-- Audio (SOUNDBOX)
-   - PSG (wavetable synthesis)
-   - Output mixer
-- CD
-   - Audio track (CD-DA) playback
-   - Subcode support
-- MiSTer
-   - Upstream PCFX to Main\_MiSTer
+- PSG (wavetable) sound.
+- KING: 16M color block mode, BG subscreens and some microprogram details.
+- RAINBOW: horizontal scroll and the block noise filter.
+- CD: read speed and read-ahead like a real drive (reads are faster than on hardware), subcode.
