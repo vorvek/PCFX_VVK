@@ -485,9 +485,18 @@ logic             vdc_cce;
 
 wire vdc0_key = VDC0_VD[7:0] != '0;
 wire vdc1_key = VDC1_VD[7:0] != '0;
+wire vdc1_spbg = VDC1_VD[8];
 
-// "Upper" 6270 has priority over "lower".
-assign vdc_vd = ~vdc1_key ? VDC0_VD : VDC1_VD;
+always @* begin
+    if ((vdc1_spbg ? cr.sp256 : cr.bg256) & VDC1_VD[7]) begin
+        vdc_vd = {vdc1_spbg, VDC0_VD[3:0], VDC1_VD[3:0]};
+    end
+    else begin
+        // "Upper" 6270 has priority over "lower".
+        vdc_vd = ~vdc1_key ? VDC0_VD : VDC1_VD;
+    end
+end
+
 assign vdc_spbg = vdc_vd[8];
 assign vdc_en = vdc_spbg ? cr.sp : cr.bg;
 assign vdc_key = vdc_en & (vdc0_key | vdc1_key);
@@ -505,6 +514,7 @@ assign layers[0].cpe = ble_cpe_t'(vdc_spbg ? (ble.vdc_sp & {2{vdc_cce}})
 
 //////////////////////////////////////////////////////////////////////
 // MMC (KING) video input
+// TODO: Output and use front priority layer # from MMC
 
 logic [8:0]     mmc_cpa;
 logic [23:0]    mmc_vd;
@@ -857,14 +867,24 @@ end
 //////////////////////////////////////////////////////////////////////
 // Final output
 
+localparam [23:0] PD_BLACK = {8'd0, 8'd128, 8'd128};
+
+yuv888_t pdo;
+
+always @* begin
+    pdo = PD_BLACK;
+    if (cr.bg71 | |cr.bmg | cr.sp | cr.bg)
+        pdo = ccdp_reg2;
+end
+
 always @(posedge CLK) if (DCK70) begin
     VBL <= vbl_ff;
     HBL <= hbl_ff;
     SDRAM_HBLANK <= sdram_hbl_ff;
 
-    Y <= ccdp_reg2.y;
-    U <= ccdp_reg2.u;
-    V <= ccdp_reg2.v;
+    Y <= pdo.y;
+    U <= pdo.u;
+    V <= pdo.v;
 end
 
 endmodule
